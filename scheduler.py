@@ -1,21 +1,17 @@
-from datetime import datetime, time, timedelta
+from datetime import datetime
 import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 from telegram.constants import ParseMode
 
 import config
 import database as db
-from handlers import send_reminders, user_label
+from handlers import user_label
 
 TICK_INTERVAL_SECONDS = 30
 
 
 async def tick(ctx):
-    """
-    Runs every 30 seconds.
-    Checks each user's local time against their personal reminder schedule.
-    Also checks if it's time to post the daily summary.
-    """
     now_utc = datetime.now(pytz.utc)
 
     # ── Per-user reminders ──
@@ -27,11 +23,9 @@ async def tick(ctx):
         user_date = user_now.strftime("%Y-%m-%d")
         user_hm = user_now.strftime("%H:%M")
 
-        # Skip if not on schedule
         if not db.should_remind_user(user["user_id"], user_date):
             continue
 
-        # Skip if already submitted
         existing = db.get_today_report(user["user_id"], user_date)
         if existing:
             continue
@@ -48,7 +42,6 @@ async def tick(ctx):
         if round_num is None:
             continue
 
-        # Check if already reminded this round today
         conn = db.get_conn()
         already = conn.execute(
             "SELECT 1 FROM reminders WHERE user_id = ? AND remind_date = ? AND round = ?",
@@ -59,23 +52,12 @@ async def tick(ctx):
         if already:
             continue
 
-        # Send reminder
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📝 Write Report", callback_data="write_report")]
         ])
-
         messages = {
-            1: (
-                "⏰ *Good morning!*\n\n"
-                "Time to write your daily report for today.\n"
-                "Tap the button below or send /report to get started."
-            ),
-            2: (
-                "⏰ *Second reminder!*\n\n"
-                "You haven't submitted today's daily report yet.\n"
-                "Please submit ASAP 🙏"
-            ),
+            1: "⏰ *Good morning!*\n\nTime to write your daily report for today.\nTap the button below or send /report to get started.",
+            2: "⏰ *Second reminder!*\n\nYou haven't submitted today's daily report yet.\nPlease submit ASAP 🙏",
         }
 
         try:
@@ -90,7 +72,7 @@ async def tick(ctx):
         except Exception as e:
             print(f"[Tick] Failed to remind {user['user_id']}: {e}")
 
-    # ── Summary check ──
+    # ── Summary check (TODAY's summary, not yesterday's) ──
     summary_time_str = db.get_setting("summary_time", config.DEFAULT_SUMMARY_TIME)
     summary_tz_str = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
     summary_tz = pytz.timezone(summary_tz_str)
@@ -98,30 +80,36 @@ async def tick(ctx):
     summary_hm = summary_now.strftime("%H:%M")
 
     if summary_hm == summary_time_str:
-        # Check if already posted today
-        summary_date = summary_now.strftime("%Y-%m-%d")
+        summary_date = summary_now.strftime("%Y-%m-%d")  # ← TODAY
         already_key = f"summary_posted_{summary_date}"
+
         conn = db.get_conn()
-        already = conn.execute(
-            "SELECT 1 FROM settings WHERE key = ?", (already_key,)
-        ).fetchone()
+        already = conn.execute("SELECT 1 FROM settings WHERE key = ?", (already_key,)).fetchone()
         conn.close()
 
         if not already:
-            await post_daily_summary(ctx, summary_tz_str)
-            db.set_setting(already_key, "1")
+            posted = await post_daily_summary(ctx, summary_date)
+            if posted:
+                db.set_setting(already_key, "1")
 
 
-async def post_daily_summary(ctx, timezone_str: str):
-    """Post yesterday's summary to the channel."""
-    tz = pytz.timezone(timezone_str)
-    yesterday = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+async def post_daily_summary(ctx, report_date: str) -> bool:
+    """
+    Post today's summary to the channel.
+    Only posts if submitted count >= summary_min_reports.
+    Returns True if posted, False if skipped.
+    """
+    min_reports = int(db.get_setting("summary_min_reports", "2"))
+    expected = db.get_active_expected_users(report_date)
+    reports = db.get_reports_for_date(report_date)
 
-    expected = db.get_active_expected_users(yesterday)
-    reports = db.get_reports_for_date(yesterday)
+    if len(reports) < min_reports:
+        print(f"[Summary] Skipped {report_date}: only {len(reports)} report(s), need >= {min_reports}")
+        return False
+
     submitted_ids = {r["user_id"] for r in reports}
 
-    lines = [f"📊 *Daily Summary — {yesterday}*\n"]
+    lines = [f"📊 *Daily Summary — {report_date}*\n"]
 
     lines.append(f"✅ *Submitted ({len(reports)}/{len(expected)}):*")
     if reports:
@@ -147,17 +135,18 @@ async def post_daily_summary(ctx, timezone_str: str):
             text="\n".join(lines),
             parse_mode=ParseMode.MARKDOWN
         )
-        print(f"[Summary] Posted for {yesterday}")
+        print(f"[Summary] Posted for {report_date}")
+        return True
     except Exception as e:
         print(f"[Summary] Failed: {e}")
+        return False
 
 
 def setup_scheduler(app: Application):
-    """Use a single repeating job that ticks every 30s to check all schedules."""
     app.job_queue.run_repeating(
         tick,
         interval=TICK_INTERVAL_SECONDS,
-        first=5,  # start 5s after boot
+        first=5,
         name="global_tick"
     )
     print(f"[Scheduler] Global tick every {TICK_INTERVAL_SECONDS}s")

@@ -8,7 +8,7 @@ import config
 import database as db
 from handlers import (
     cmd_start, cmd_register,
-    cmd_adduser, cmd_removeuser, cmd_rename,              # ← NEW
+    cmd_adduser, cmd_removeuser, cmd_rename,
     cmd_listusers,
     cmd_report, cmd_update, cmd_status, cmd_myreport,
     cmd_summary, cmd_remind,
@@ -32,10 +32,8 @@ async def post_init(app: Application):
 
 def main():
     db.init_db()
-
     app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
-    # ── User commands ──
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("register", cmd_register))
     app.add_handler(CommandHandler("report", cmd_report))
@@ -43,10 +41,9 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("myreport", cmd_myreport))
 
-    # ── Admin commands ──
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("removeuser", cmd_removeuser))
-    app.add_handler(CommandHandler("rename", cmd_rename))           # ← NEW
+    app.add_handler(CommandHandler("rename", cmd_rename))
     app.add_handler(CommandHandler("listusers", cmd_listusers))
     app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CommandHandler("summary", cmd_summary))
@@ -57,16 +54,13 @@ def main():
     app.add_handler(CommandHandler("setsummary", cmd_setsummary))
     app.add_handler(CommandHandler("settings", cmd_settings))
 
-    # ── Callbacks & text ──
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
         handle_text,
     ))
 
-    # ── Scheduler ──
     setup_scheduler(app)
-
     logging.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
 

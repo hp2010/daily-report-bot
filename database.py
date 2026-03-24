@@ -1,7 +1,6 @@
 import sqlite3
-import json
-from datetime import datetime, date, timedelta
-from typing import Optional, List
+from datetime import datetime, timedelta
+from typing import Optional
 import pytz
 
 import config
@@ -18,7 +17,6 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    # ── Create tables if not exist ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -76,32 +74,13 @@ def init_db():
         )
     """)
 
-    # ── Migrate: add missing columns to existing tables ──
-    _migrate_add_column(c, "users", "timezone", "TEXT DEFAULT 'Asia/Shanghai'")
-    _migrate_add_column(c, "users", "first_reminder", "TEXT DEFAULT '10:00'")
-    _migrate_add_column(c, "users", "second_reminder", "TEXT DEFAULT '11:00'")
-    _migrate_add_column(c, "reminders", "round", "INTEGER DEFAULT 1")
-
-    # ── Default settings ──
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weekends_off', '1')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_time', ?)", (config.DEFAULT_SUMMARY_TIME,))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_timezone', ?)", (config.SUMMARY_TIMEZONE,))
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_min_reports', '2')")  # ← NEW
 
     conn.commit()
     conn.close()
-    print("[DB] Initialized and migrated.")
-
-
-def _migrate_add_column(cursor, table: str, column: str, col_type: str):
-    """Safely add a column if it doesn't exist."""
-    try:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        print(f"[DB] Migrated: added {table}.{column}")
-    except sqlite3.OperationalError as e:
-        if "duplicate column" in str(e).lower():
-            pass  # column already exists, fine
-        else:
-            raise
 
 
 # ──────────────────── Settings ────────────────────
@@ -165,6 +144,27 @@ def get_user(user_id: int):
     return row
 
 
+def find_users_by_name(name_query: str, active_only: bool = True) -> list:
+    conn = get_conn()
+    query = "%" + name_query.strip().lower() + "%"
+    sql = """
+        SELECT * FROM users
+        WHERE (LOWER(display_name) LIKE ? OR LOWER(username) LIKE ?)
+    """
+    if active_only:
+        sql += " AND is_active = 1"
+    rows = conn.execute(sql, (query, query)).fetchall()
+    conn.close()
+    return rows
+
+
+def rename_user(user_id: int, new_name: str):
+    conn = get_conn()
+    conn.execute("UPDATE users SET display_name = ? WHERE user_id = ?", (new_name, user_id))
+    conn.commit()
+    conn.close()
+
+
 def update_user_timezone(user_id: int, timezone: str):
     conn = get_conn()
     conn.execute("UPDATE users SET timezone = ? WHERE user_id = ?", (timezone, user_id))
@@ -185,10 +185,6 @@ def update_user_reminders(user_id: int, first_reminder: str = None, second_remin
 # ──────────────────── Schedule overrides ────────────────────
 
 def add_override(scope: str, date_str: str, override_type: str, note: str = None):
-    """
-    scope: "all" for global, or str(user_id) for per-user
-    override_type: "vacation" or "duty"
-    """
     conn = get_conn()
     conn.execute(
         "INSERT OR REPLACE INTO schedule_overrides (scope, date, type, note) VALUES (?, ?, ?, ?)",
@@ -210,32 +206,18 @@ def remove_override(scope: str, date_str: str, override_type: str):
 
 def get_overrides_for_date(date_str: str) -> list:
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM schedule_overrides WHERE date = ?",
-        (date_str,)
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM schedule_overrides WHERE date = ?", (date_str,)).fetchall()
     conn.close()
     return rows
 
 
 def should_remind_user(user_id: int, date_str: str) -> bool:
-    """
-    Determine if a user should be reminded on a given date.
-
-    Priority logic:
-    1. Per-user "duty" override → MUST remind (even on weekends/holidays)
-    2. Per-user "vacation" override → DO NOT remind
-    3. Global "vacation" override (all) → DO NOT remind
-    4. Weekend + weekends_off setting → DO NOT remind
-    5. Otherwise → remind
-    """
     overrides = get_overrides_for_date(date_str)
-
     user_scope = str(user_id)
 
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "duty":
-            return True  # explicit duty, override everything
+            return True
 
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "vacation":
@@ -245,12 +227,10 @@ def should_remind_user(user_id: int, date_str: str) -> bool:
         if o["scope"] == "all" and o["type"] == "vacation":
             return False
 
-    # Check weekend
     dt = datetime.strptime(date_str, "%Y-%m-%d")
-    if dt.weekday() in (5, 6):  # Saturday, Sunday
+    if dt.weekday() in (5, 6):
         weekends_off = get_setting("weekends_off", "1")
         if weekends_off == "1":
-            # check if this user has a duty override (already handled above)
             return False
 
     return True
@@ -313,10 +293,7 @@ def update_report(user_id: int, report_date: str, content: str) -> Optional[int]
 
 def update_channel_message_id(report_id: int, channel_message_id: int):
     conn = get_conn()
-    conn.execute(
-        "UPDATE reports SET channel_message_id = ? WHERE id = ?",
-        (channel_message_id, report_id)
-    )
+    conn.execute("UPDATE reports SET channel_message_id = ? WHERE id = ?", (channel_message_id, report_id))
     conn.commit()
     conn.close()
 
@@ -352,7 +329,6 @@ def record_reminder(user_id: int, remind_date: str, round_num: int):
 
 
 def get_unsubmitted_users(report_date: str) -> list:
-    """Only active users who should be reminded and haven't submitted."""
     conn = get_conn()
     rows = conn.execute(
         """SELECT u.* FROM users u
@@ -363,12 +339,10 @@ def get_unsubmitted_users(report_date: str) -> list:
         (report_date,)
     ).fetchall()
     conn.close()
-    # further filter by schedule
     return [u for u in rows if should_remind_user(u["user_id"], report_date)]
 
 
 def get_reports_for_date(report_date: str) -> list:
-    """Only show reports from currently active users."""
     conn = get_conn()
     rows = conn.execute(
         """SELECT r.*, u.display_name, u.username
@@ -384,34 +358,5 @@ def get_reports_for_date(report_date: str) -> list:
 
 
 def get_active_expected_users(report_date: str) -> list:
-    """Users who are active AND expected to report on this date (not on vacation)."""
     users = get_active_users()
     return [u for u in users if should_remind_user(u["user_id"], report_date)]
-
-
-def find_users_by_name(name_query: str, active_only: bool = True) -> list:
-    """
-    Fuzzy match users by display_name or username (case-insensitive).
-    Returns list of matching user rows.
-    """
-    conn = get_conn()
-    query = "%" + name_query.strip().lower() + "%"
-    sql = """
-        SELECT * FROM users
-        WHERE (LOWER(display_name) LIKE ? OR LOWER(username) LIKE ?)
-    """
-    if active_only:
-        sql += " AND is_active = 1"
-    rows = conn.execute(sql, (query, query)).fetchall()
-    conn.close()
-    return rows
-
-
-def rename_user(user_id: int, new_name: str):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE users SET display_name = ? WHERE user_id = ?",
-        (new_name, user_id)
-    )
-    conn.commit()
-    conn.close()
