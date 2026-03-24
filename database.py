@@ -387,3 +387,31 @@ def get_active_expected_users(report_date: str) -> list:
     """Users who are active AND expected to report on this date (not on vacation)."""
     users = get_active_users()
     return [u for u in users if should_remind_user(u["user_id"], report_date)]
+
+
+def find_users_by_name(name_query: str, active_only: bool = True) -> list:
+    """
+    Fuzzy match users by display_name or username (case-insensitive).
+    Returns list of matching user rows.
+    """
+    conn = get_conn()
+    query = "%" + name_query.strip().lower() + "%"
+    sql = """
+        SELECT * FROM users
+        WHERE (LOWER(display_name) LIKE ? OR LOWER(username) LIKE ?)
+    """
+    if active_only:
+        sql += " AND is_active = 1"
+    rows = conn.execute(sql, (query, query)).fetchall()
+    conn.close()
+    return rows
+
+
+def rename_user(user_id: int, new_name: str):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET display_name = ? WHERE user_id = ?",
+        (new_name, user_id)
+    )
+    conn.commit()
+    conn.close()

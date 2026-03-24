@@ -44,7 +44,6 @@ def user_label(row) -> str:
 
 
 def parse_time_str(s: str) -> tuple:
-    """Parse 'HH:MM' → (hour, minute). Returns None on failure."""
     try:
         parts = s.strip().split(":")
         h, m = int(parts[0]), int(parts[1])
@@ -55,12 +54,87 @@ def parse_time_str(s: str) -> tuple:
     return None
 
 
+# ← NEW: Unified user resolution — accepts name or ID
+async def resolve_user(identifier: str, update: Update) -> dict | None:
+    """
+    Resolve a user by numeric ID or display name.
+    If ambiguous, prompt the admin to pick.
+    Returns a user row dict or None.
+    """
+    identifier = identifier.strip()
+
+    # Try numeric ID first
+    try:
+        uid = int(identifier)
+        user = db.get_user(uid)
+        if user and user["is_active"]:
+            return dict(user)
+        elif user:
+            # exists but inactive
+            return dict(user)
+        else:
+            # no such user by ID, fall through to name search
+            pass
+    except ValueError:
+        pass
+
+    # Name search
+    matches = db.find_users_by_name(identifier, active_only=False)
+
+    if len(matches) == 0:
+        await update.message.reply_text(
+            f"❌ No user found matching `{identifier}`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return None
+
+    if len(matches) == 1:
+        return dict(matches[0])
+
+    # Multiple matches — ask admin to be more specific
+    lines = [f"⚠️ Multiple users match `{identifier}`. Please be more specific:\n"]
+    for m in matches:
+        status = "✅" if m["is_active"] else "❌ inactive"
+        lines.append(f"• {user_label(m)} — `{m['user_id']}` ({status})")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    return None
+
+
+# ← NEW: resolve user but require active
+async def resolve_active_user(identifier: str, update: Update) -> dict | None:
+    """Same as resolve_user but only returns active users."""
+    identifier = identifier.strip()
+
+    try:
+        uid = int(identifier)
+        user = db.get_user(uid)
+        if user and user["is_active"]:
+            return dict(user)
+    except ValueError:
+        pass
+
+    matches = db.find_users_by_name(identifier, active_only=True)
+
+    if len(matches) == 0:
+        await update.message.reply_text(
+            f"❌ No active user found matching `{identifier}`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return None
+
+    if len(matches) == 1:
+        return dict(matches[0])
+
+    lines = [f"⚠️ Multiple active users match `{identifier}`. Please be more specific:\n"]
+    for m in matches:
+        lines.append(f"• {user_label(m)} — `{m['user_id']}`")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    return None
+
+
 # ──────────────────── Bot menu setup ────────────────────
 
 async def setup_commands(app):
-    """Register slash-command menus with Telegram."""
-
-    # ── Commands visible to all users in private chat ──
     user_commands = [
         BotCommand("register", "Join the daily report list"),
         BotCommand("report", "Submit today's report"),
@@ -69,27 +143,25 @@ async def setup_commands(app):
         BotCommand("myreport", "View your today's report"),
     ]
 
-    # ── Full command list for admins ──
     admin_commands = user_commands + [
-        BotCommand("adduser", "Add a user (admin)"),
-        BotCommand("removeuser", "Remove a user (admin)"),
-        BotCommand("listusers", "List all active users (admin)"),
-        BotCommand("remind", "Manually trigger reminders (admin)"),
-        BotCommand("summary", "Today's full summary (admin)"),
-        BotCommand("settz", "Set user timezone (admin)"),
-        BotCommand("setreminders", "Set user reminder times (admin)"),
-        BotCommand("vacation", "Set vacation/duty day (admin)"),
-        BotCommand("schedule", "View schedule overrides (admin)"),
-        BotCommand("setsummary", "Set summary time (admin)"),
-        BotCommand("settings", "View current settings (admin)"),
+        BotCommand("adduser", "Add a user"),
+        BotCommand("removeuser", "Remove a user"),
+        BotCommand("rename", "Rename a user"),                      # ← NEW
+        BotCommand("listusers", "List all active users"),
+        BotCommand("remind", "Manually trigger reminders"),
+        BotCommand("summary", "Today's full summary"),
+        BotCommand("settz", "Set user timezone"),
+        BotCommand("setreminders", "Set user reminder times"),
+        BotCommand("vacation", "Set vacation/duty day"),
+        BotCommand("schedule", "View schedule overrides"),
+        BotCommand("setsummary", "Set summary time"),
+        BotCommand("settings", "View current settings"),
     ]
 
     from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeChat
 
-    # Default commands for all private chats
     await app.bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
 
-    # Per-admin overrides
     for admin_id in config.ADMIN_IDS:
         try:
             await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
@@ -204,7 +276,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.extend(pending or ["  (none)"])
     lines.append(f"\n📈 Completion: {len(done)}/{len(expected)}")
 
-    # Show who is on vacation/off today
     all_active = db.get_active_users()
     off_users = [u for u in all_active if not db.should_remind_user(u["user_id"], date)]
     if off_users:
@@ -217,43 +288,93 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ──────────────────── Admin commands ────────────────────
 
+# ← CHANGED: accepts name or ID
 async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only.")
 
     if not ctx.args:
         return await update.message.reply_text(
-            "Usage: `/adduser <user_id> [display name]`",
+            "Usage: `/adduser <user_id> [display name]`\n\n"
+            "The user\\_id must be numeric (ask them to /start the bot first).",
             parse_mode=ParseMode.MARKDOWN
         )
 
     try:
         uid = int(ctx.args[0])
     except ValueError:
-        return await update.message.reply_text("❌ user\\_id must be a number.")
+        return await update.message.reply_text("❌ user\\_id must be a number for adding new users.")
 
     name = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else str(uid)
     db.add_user(uid, display_name=name)
     await update.message.reply_text(
-        f"✅ Added user: {name} (`{uid}`)",
+        f"✅ Added user: *{name}* (`{uid}`)",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
+# ← CHANGED: accepts name or ID
 async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only.")
 
     if not ctx.args:
         return await update.message.reply_text(
-            "Usage: `/removeuser <user_id>`",
+            "Usage: `/removeuser <name or user_id>`",
             parse_mode=ParseMode.MARKDOWN
         )
 
-    uid = int(ctx.args[0])
-    db.remove_user(uid)
+    identifier = " ".join(ctx.args)
+    user = await resolve_active_user(identifier, update)
+    if not user:
+        return
+
+    db.remove_user(user["user_id"])
     await update.message.reply_text(
-        f"✅ Removed user `{uid}`. Their reports are now hidden from summaries.",
+        f"✅ Removed *{user_label(user)}* (`{user['user_id']}`). "
+        f"Their reports are now hidden from summaries.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+# ← NEW: /rename
+async def cmd_rename(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("⛔ Admin only.")
+
+    if len(ctx.args) < 2:
+        return await update.message.reply_text(
+            "Usage: `/rename <current name or user_id> :: <new name>`\n\n"
+            "Example:\n"
+            "`/rename Alice :: Alice Wang`\n"
+            "`/rename 123456 :: Bob Chen`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    raw = " ".join(ctx.args)
+    if "::" not in raw:
+        return await update.message.reply_text(
+            "❌ Please use `::` to separate current identity and new name.\n\n"
+            "Example: `/rename Alice :: Alice Wang`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    parts = raw.split("::", 1)
+    identifier = parts[0].strip()
+    new_name = parts[1].strip()
+
+    if not new_name:
+        return await update.message.reply_text("❌ New name cannot be empty.")
+
+    user = await resolve_user(identifier, update)
+    if not user:
+        return
+
+    old_name = user_label(user)
+    db.rename_user(user["user_id"], new_name)
+
+    await update.message.reply_text(
+        f"✅ Renamed *{old_name}* → *{new_name}* (`{user['user_id']}`)",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -270,7 +391,7 @@ async def cmd_listusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for u in users:
         tz_str = u["timezone"] or config.DEFAULT_TIMEZONE
         lines.append(
-            f"• {user_label(u)}  (`{u['user_id']}`)\n"
+            f"• *{user_label(u)}*  (`{u['user_id']}`)\n"
             f"  🕐 {tz_str}  ⏰ {u['first_reminder']} / {u['second_reminder']}"
         )
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
@@ -302,16 +423,17 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
-# ──── /settz <user_id> <timezone> ────
-
+# ← CHANGED: accepts name or ID
 async def cmd_settz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only.")
 
     if len(ctx.args) < 2:
         return await update.message.reply_text(
-            "Usage: `/settz <user_id> <timezone>`\n"
-            "Example: `/settz 123456 America/New_York`\n\n"
+            "Usage: `/settz <name or user_id> <timezone>`\n\n"
+            "Example:\n"
+            "`/settz Alice America/New_York`\n"
+            "`/settz 123456 Asia/Tokyo`\n\n"
             "Common timezones:\n"
             "• `Asia/Shanghai` (UTC+8)\n"
             "• `Asia/Tokyo` (UTC+9)\n"
@@ -321,51 +443,70 @@ async def cmd_settz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
 
-    uid = int(ctx.args[0])
-    tz_str = ctx.args[1]
+    # Last arg is timezone, everything before is the identifier
+    tz_str = ctx.args[-1]
+    identifier = " ".join(ctx.args[:-1])
 
     try:
         pytz.timezone(tz_str)
     except pytz.exceptions.UnknownTimeZoneError:
-        return await update.message.reply_text(f"❌ Unknown timezone: `{tz_str}`", parse_mode=ParseMode.MARKDOWN)
+        return await update.message.reply_text(
+            f"❌ Unknown timezone: `{tz_str}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-    db.update_user_timezone(uid, tz_str)
+    user = await resolve_active_user(identifier, update)
+    if not user:
+        return
+
+    db.update_user_timezone(user["user_id"], tz_str)
     await update.message.reply_text(
-        f"✅ Timezone for `{uid}` set to `{tz_str}`.",
+        f"✅ Timezone for *{user_label(user)}* set to `{tz_str}`.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
-# ──── /setreminders <user_id> <first_time> <second_time> ────
-
+# ← CHANGED: accepts name or ID
 async def cmd_setreminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only.")
 
     if len(ctx.args) < 3:
         return await update.message.reply_text(
-            "Usage: `/setreminders <user_id> <1st_time> <2nd_time>`\n"
-            "Example: `/setreminders 123456 09:00 10:30`\n"
+            "Usage: `/setreminders <name or user_id> <1st_time> <2nd_time>`\n\n"
+            "Example:\n"
+            "`/setreminders Alice 09:00 10:30`\n"
+            "`/setreminders 123456 09:00 10:30`\n\n"
             "Times are in the user's local timezone.",
             parse_mode=ParseMode.MARKDOWN
         )
 
-    uid = int(ctx.args[0])
-    t1 = parse_time_str(ctx.args[1])
-    t2 = parse_time_str(ctx.args[2])
+    # Last two args are times, everything before is the identifier
+    t2_str = ctx.args[-1]
+    t1_str = ctx.args[-2]
+    identifier = " ".join(ctx.args[:-2])
+
+    t1 = parse_time_str(t1_str)
+    t2 = parse_time_str(t2_str)
 
     if not t1 or not t2:
-        return await update.message.reply_text("❌ Invalid time format. Use `HH:MM`.", parse_mode=ParseMode.MARKDOWN)
+        return await update.message.reply_text(
+            "❌ Invalid time format. Use `HH:MM`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-    db.update_user_reminders(uid, first_reminder=ctx.args[1], second_reminder=ctx.args[2])
+    user = await resolve_active_user(identifier, update)
+    if not user:
+        return
+
+    db.update_user_reminders(user["user_id"], first_reminder=t1_str, second_reminder=t2_str)
     await update.message.reply_text(
-        f"✅ Reminders for `{uid}` set to `{ctx.args[1]}` and `{ctx.args[2]}`.",
+        f"✅ Reminders for *{user_label(user)}* set to `{t1_str}` and `{t2_str}`.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
-# ──── /vacation ────
-
+# ← CHANGED: /vacation also accepts names
 async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only.")
@@ -377,56 +518,131 @@ async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "`/vacation all 2025-01-20`\n"
             "`/vacation all 2025-01-20 2025-01-24` (range)\n\n"
             "Set one user on vacation:\n"
-            "`/vacation 123456 2025-01-20`\n"
-            "`/vacation 123456 2025-01-20 2025-01-24` (range)\n\n"
+            "`/vacation Alice 2025-01-20`\n"
+            "`/vacation Alice 2025-01-20 2025-01-24`\n\n"
             "Set one user on duty (overrides weekend/holiday):\n"
-            "`/vacation duty 123456 2025-01-25`\n\n"
+            "`/vacation duty Alice 2025-01-25`\n\n"
             "Remove an override:\n"
             "`/vacation remove all 2025-01-20`\n"
-            "`/vacation remove 123456 2025-01-20`",
+            "`/vacation remove Alice 2025-01-20`",
             parse_mode=ParseMode.MARKDOWN
         )
 
     args = list(ctx.args)
 
-    # ── /vacation remove ... ──
+    # ── /vacation remove <scope> <date> ──
     if args[0].lower() == "remove":
         if len(args) < 3:
-            return await update.message.reply_text("Usage: `/vacation remove <scope> <date>`", parse_mode=ParseMode.MARKDOWN)
-        scope = args[1]
-        date_str = args[2]
+            return await update.message.reply_text(
+                "Usage: `/vacation remove <name/all> <date>`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        date_str = args[-1]
+        scope_raw = " ".join(args[1:-1])
+        scope = await _resolve_scope(scope_raw, update)
+        if scope is None:
+            return
         db.remove_override(scope, date_str, "vacation")
         db.remove_override(scope, date_str, "duty")
-        return await update.message.reply_text(f"✅ Removed overrides for `{scope}` on `{date_str}`.", parse_mode=ParseMode.MARKDOWN)
+        scope_display = "everyone" if scope == "all" else f"*{scope_raw}*"
+        return await update.message.reply_text(
+            f"✅ Removed overrides for {scope_display} on `{date_str}`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-    # ── /vacation duty <user_id> <date> [end_date] ──
+    # ── /vacation duty <scope> <date> [end_date] ──
     if args[0].lower() == "duty":
         if len(args) < 3:
-            return await update.message.reply_text("Usage: `/vacation duty <user_id> <date> [end_date]`", parse_mode=ParseMode.MARKDOWN)
-        scope = args[1]
-        start = args[2]
-        end = args[3] if len(args) > 3 else start
+            return await update.message.reply_text(
+                "Usage: `/vacation duty <name> <date> [end_date]`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        # Find where dates start (look from the end for date-like strings)
+        dates_args, name_args = _split_dates_from_end(args[1:])
+        if not dates_args or not name_args:
+            return await update.message.reply_text(
+                "❌ Could not parse. Usage: `/vacation duty Alice 2025-01-25`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        scope_raw = " ".join(name_args)
+        scope = await _resolve_scope(scope_raw, update)
+        if scope is None:
+            return
+        start = dates_args[0]
+        end = dates_args[1] if len(dates_args) > 1 else start
         dates = _date_range(start, end)
         for d in dates:
             db.add_override(scope, d, "duty", note="admin set duty")
+        scope_display = f"*{scope_raw}*"
         return await update.message.reply_text(
-            f"✅ Duty set for `{scope}`: {dates[0]} → {dates[-1]} ({len(dates)} day(s)).",
+            f"💼 Duty set for {scope_display}: `{dates[0]}` → `{dates[-1]}` ({len(dates)} day(s)).",
             parse_mode=ParseMode.MARKDOWN
         )
 
     # ── /vacation <scope> <date> [end_date] ──
-    scope = args[0]  # "all" or user_id
-    start = args[1]
-    end = args[2] if len(args) > 2 else start
+    dates_args, name_args = _split_dates_from_end(args)
+    if not dates_args or not name_args:
+        return await update.message.reply_text(
+            "❌ Could not parse. Make sure dates are at the end in `YYYY-MM-DD` format.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    scope_raw = " ".join(name_args)
+    scope = await _resolve_scope(scope_raw, update)
+    if scope is None:
+        return
+
+    start = dates_args[0]
+    end = dates_args[1] if len(dates_args) > 1 else start
     dates = _date_range(start, end)
     for d in dates:
         db.add_override(scope, d, "vacation", note="admin set vacation")
 
-    scope_label = "everyone" if scope == "all" else f"user `{scope}`"
+    scope_display = "everyone" if scope == "all" else f"*{scope_raw}*"
     await update.message.reply_text(
-        f"🏖️ Vacation set for {scope_label}: {dates[0]} → {dates[-1]} ({len(dates)} day(s)).",
+        f"🏖️ Vacation set for {scope_display}: `{dates[0]}` → `{dates[-1]}` ({len(dates)} day(s)).",
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+def _is_date_str(s: str) -> bool:
+    """Check if a string looks like YYYY-MM-DD."""
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _split_dates_from_end(args: list) -> tuple:
+    """
+    Split args into (date_args, name_args) by scanning from the end.
+    Returns (dates_from_end_reversed, remaining_name_args).
+    E.g. ["Alice", "Wang", "2025-01-20", "2025-01-24"]
+         → (["2025-01-20", "2025-01-24"], ["Alice", "Wang"])
+    """
+    dates = []
+    i = len(args) - 1
+    while i >= 0 and _is_date_str(args[i]):
+        dates.insert(0, args[i])
+        i -= 1
+    name_args = args[:i + 1]
+    return (dates, name_args)
+
+
+async def _resolve_scope(scope_raw: str, update: Update) -> str | None:
+    """
+    Resolve scope string to either "all" or a user_id string.
+    Returns None if resolution fails.
+    """
+    if scope_raw.lower() == "all":
+        return "all"
+
+    # Try as user identifier
+    user = await resolve_active_user(scope_raw, update)
+    if user:
+        return str(user["user_id"])
+    return None
 
 
 def _date_range(start: str, end: str) -> list:
@@ -454,7 +670,10 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parts = ctx.args[0].split("-")
             year, month = int(parts[0]), int(parts[1])
         except (ValueError, IndexError):
-            return await update.message.reply_text("Usage: `/schedule [YYYY-MM]`", parse_mode=ParseMode.MARKDOWN)
+            return await update.message.reply_text(
+                "Usage: `/schedule [YYYY-MM]`",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
     overrides = db.get_overrides_for_month(year, month)
     weekends_off = db.get_setting("weekends_off", "1") == "1"
@@ -470,7 +689,15 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append("*Overrides:*")
         for o in overrides:
             icon = "🏖️" if o["type"] == "vacation" else "💼"
-            scope_label = "Everyone" if o["scope"] == "all" else f"User {o['scope']}"
+            if o["scope"] == "all":
+                scope_label = "Everyone"
+            else:
+                # Try to show name instead of ID
+                try:
+                    u = db.get_user(int(o["scope"]))
+                    scope_label = user_label(u) if u else o["scope"]
+                except (ValueError, TypeError):
+                    scope_label = o["scope"]
             lines.append(f"  {icon} {o['date']} — {scope_label} ({o['type']})")
     else:
         lines.append("No overrides this month.")
@@ -478,7 +705,7 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
-# ──── /setsummary <HH:MM> [timezone] ────
+# ──── /setsummary ────
 
 async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -496,7 +723,10 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     t = parse_time_str(ctx.args[0])
     if not t:
-        return await update.message.reply_text("❌ Invalid time. Use `HH:MM`.", parse_mode=ParseMode.MARKDOWN)
+        return await update.message.reply_text(
+            "❌ Invalid time. Use `HH:MM`.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
     db.set_setting("summary_time", ctx.args[0])
 
@@ -505,7 +735,10 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             pytz.timezone(tz_str)
         except pytz.exceptions.UnknownTimeZoneError:
-            return await update.message.reply_text(f"❌ Unknown timezone: `{tz_str}`", parse_mode=ParseMode.MARKDOWN)
+            return await update.message.reply_text(
+                f"❌ Unknown timezone: `{tz_str}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
         db.set_setting("summary_timezone", tz_str)
 
     await update.message.reply_text(
@@ -527,7 +760,6 @@ async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [
         "⚙️ *Current Settings*\n",
         f"📅 Weekends off: *{weekends}*",
-        f"    Toggle: `/vacation weekends on` or `off`",
         f"📊 Summary time: *{summary_t}* ({summary_tz})",
         f"🌏 Default TZ: *{config.DEFAULT_TIMEZONE}*",
         f"⏰ Default reminders: *{config.DEFAULT_FIRST_REMINDER}* / *{config.DEFAULT_SECOND_REMINDER}*",
@@ -548,6 +780,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     content = update.message.text
     name = get_display_name(user)
 
+    # Use DB display_name if available (may have been renamed by admin)
+    db_user = db.get_user(user.id)
+    if db_user and db_user["display_name"]:
+        name = db_user["display_name"]
+
     if state == "awaiting_report":
         report_id = db.save_report(user.id, date, content, update.message.message_id)
         if report_id is None:
@@ -566,7 +803,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["state"] = None
 
-    # ── Sync to channel ──
     channel_text = (
         f"📋 *Daily Report — {date}*\n"
         f"👤 *{name}*\n"
@@ -605,7 +841,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         date = today_for_user(query.from_user.id)
         existing = db.get_today_report(query.from_user.id, date)
         if existing:
-            return await query.message.reply_text("📋 You already submitted today. Use /update to modify.")
+            return await query.message.reply_text(
+                "📋 You already submitted today. Use /update to modify."
+            )
         ctx.user_data["state"] = "awaiting_report"
         await query.message.reply_text(
             f"📝 *Daily Report — {date}*\n\nPlease type your report below 👇",
@@ -616,7 +854,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ──────────────────── Reminder engine ────────────────────
 
 async def send_reminders(ctx: ContextTypes.DEFAULT_TYPE, round_num: int = 1) -> int:
-    """Send reminders to users whose local time matches the scheduled round."""
     users = db.get_active_users()
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Write Report", callback_data="write_report")]
@@ -643,11 +880,9 @@ async def send_reminders(ctx: ContextTypes.DEFAULT_TYPE, round_num: int = 1) -> 
         user_now = datetime.now(user_timezone)
         user_date = user_now.strftime("%Y-%m-%d")
 
-        # Check schedule
         if not db.should_remind_user(user["user_id"], user_date):
             continue
 
-        # Check if already submitted
         existing = db.get_today_report(user["user_id"], user_date)
         if existing:
             continue

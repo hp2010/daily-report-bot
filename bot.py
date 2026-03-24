@@ -8,7 +8,8 @@ import config
 import database as db
 from handlers import (
     cmd_start, cmd_register,
-    cmd_adduser, cmd_removeuser, cmd_listusers,
+    cmd_adduser, cmd_removeuser, cmd_rename,              # ← NEW
+    cmd_listusers,
     cmd_report, cmd_update, cmd_status, cmd_myreport,
     cmd_summary, cmd_remind,
     cmd_settz, cmd_setreminders,
@@ -26,7 +27,6 @@ logging.basicConfig(
 
 
 async def post_init(app: Application):
-    """Called after app.initialize() — register bot menus here."""
     await setup_commands(app)
 
 
@@ -46,6 +46,7 @@ def main():
     # ── Admin commands ──
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("removeuser", cmd_removeuser))
+    app.add_handler(CommandHandler("rename", cmd_rename))           # ← NEW
     app.add_handler(CommandHandler("listusers", cmd_listusers))
     app.add_handler(CommandHandler("remind", cmd_remind))
     app.add_handler(CommandHandler("summary", cmd_summary))
