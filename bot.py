@@ -7,7 +7,7 @@ from telegram.ext import (
 import config
 import database as db
 from handlers import (
-    cmd_start, cmd_register,
+    cmd_start,                                          # ← no cmd_register
     cmd_adduser, cmd_removeuser, cmd_rename,
     cmd_listusers,
     cmd_report, cmd_update, cmd_status, cmd_myreport,
@@ -35,7 +35,7 @@ def main():
     app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("register", cmd_register))
+    # ← /register removed
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("status", cmd_status))
