@@ -1,0 +1,56 @@
+import logging
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters,
+)
+
+import config
+import database as db
+from handlers import (
+    cmd_start, cmd_register, cmd_adduser, cmd_removeuser,
+    cmd_listusers, cmd_report, cmd_update, cmd_status,
+    cmd_myreport, cmd_summary, cmd_remind,
+    handle_text, handle_callback,
+)
+from scheduler import setup_scheduler
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+)
+
+
+def main():
+    db.init_db()
+
+    app = Application.builder().token(config.BOT_TOKEN).build()
+
+    # Commands
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("register", cmd_register))
+    app.add_handler(CommandHandler("adduser", cmd_adduser))
+    app.add_handler(CommandHandler("removeuser", cmd_removeuser))
+    app.add_handler(CommandHandler("listusers", cmd_listusers))
+    app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("myreport", cmd_myreport))
+    app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("remind", cmd_remind))
+
+    # Callbacks & text
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_text,
+    ))
+
+    # Scheduler
+    setup_scheduler(app)
+
+    logging.info("Bot starting...")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
