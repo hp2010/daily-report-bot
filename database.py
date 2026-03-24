@@ -18,6 +18,7 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
+    # ── Create tables if not exist ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -56,10 +57,6 @@ def init_db():
         )
     """)
 
-    # ── Vacation / leave table ──
-    # type: "vacation" | "duty"
-    # scope: "all" (global holiday) or a user_id
-    # date: YYYY-MM-DD
     c.execute("""
         CREATE TABLE IF NOT EXISTS schedule_overrides (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +69,6 @@ def init_db():
         )
     """)
 
-    # ── Settings table (key-value) ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -80,13 +76,32 @@ def init_db():
         )
     """)
 
-    # Default: weekends off
+    # ── Migrate: add missing columns to existing tables ──
+    _migrate_add_column(c, "users", "timezone", "TEXT DEFAULT 'Asia/Shanghai'")
+    _migrate_add_column(c, "users", "first_reminder", "TEXT DEFAULT '10:00'")
+    _migrate_add_column(c, "users", "second_reminder", "TEXT DEFAULT '11:00'")
+    _migrate_add_column(c, "reminders", "round", "INTEGER DEFAULT 1")
+
+    # ── Default settings ──
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weekends_off', '1')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_time', ?)", (config.DEFAULT_SUMMARY_TIME,))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_timezone', ?)", (config.SUMMARY_TIMEZONE,))
 
     conn.commit()
     conn.close()
+    print("[DB] Initialized and migrated.")
+
+
+def _migrate_add_column(cursor, table: str, column: str, col_type: str):
+    """Safely add a column if it doesn't exist."""
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        print(f"[DB] Migrated: added {table}.{column}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" in str(e).lower():
+            pass  # column already exists, fine
+        else:
+            raise
 
 
 # ──────────────────── Settings ────────────────────
