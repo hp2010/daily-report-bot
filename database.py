@@ -38,7 +38,6 @@ def init_db():
             content TEXT,
             message_id INTEGER,
             channel_message_id INTEGER,
-            is_yesterday INTEGER DEFAULT 0,
             submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id),
             UNIQUE(user_id, report_date)
@@ -78,6 +77,12 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_time', ?)", (config.DEFAULT_SUMMARY_TIME,))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_timezone', ?)", (config.SUMMARY_TIMEZONE,))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_min_reports', '2')")
+
+    # ── Migration: add is_yesterday column if missing ──
+    columns = [row[1] for row in c.execute("PRAGMA table_info(reports)").fetchall()]
+    if "is_yesterday" not in columns:
+        c.execute("ALTER TABLE reports ADD COLUMN is_yesterday INTEGER DEFAULT 0")
+        print("[DB] Migrated: added is_yesterday column to reports")
 
     conn.commit()
     conn.close()
@@ -212,24 +217,15 @@ def get_overrides_for_date(date_str: str) -> list:
 
 
 def should_remind_user(user_id: int, date_str: str) -> bool:
-    """
-    Priority:
-    1. Per-user "duty" → MUST remind
-    2. Per-user "vacation" → DO NOT remind
-    3. Global "vacation" → DO NOT remind
-    4. Otherwise → remind
-    """
     overrides = get_overrides_for_date(date_str)
     user_scope = str(user_id)
 
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "duty":
             return True
-
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "vacation":
             return False
-
     for o in overrides:
         if o["scope"] == "all" and o["type"] == "vacation":
             return False
@@ -294,7 +290,6 @@ def update_report(user_id: int, report_date: str, content: str) -> Optional[int]
 
 
 def delete_report(user_id: int, report_date: str) -> Optional[int]:
-    """Delete a report. Returns the channel_message_id so caller can delete from channel."""
     conn = get_conn()
     row = conn.execute(
         "SELECT channel_message_id FROM reports WHERE user_id = ? AND report_date = ?",
