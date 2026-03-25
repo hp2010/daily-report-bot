@@ -23,7 +23,6 @@ def esc(text: str) -> str:
 async def tick(ctx):
     users = db.get_active_users()
 
-    # ── Per-user reminders ──
     for user in users:
         user_timezone = pytz.timezone(user["timezone"] or config.DEFAULT_TIMEZONE)
         user_now = datetime.now(user_timezone)
@@ -96,23 +95,18 @@ async def tick(ctx):
 
 
 async def post_daily_summary(ctx) -> bool:
-    """
-    Collect each user's "yesterday" report (per their own timezone).
-    Group by report_date, display grouped.
-    """
     min_reports = int(db.get_setting("summary_min_reports", "2"))
     users = db.get_active_users()
 
-    # Collect per-user yesterday's report
-    collected = []        # list of (report_date, user_row, report_row)
-    missing_users = []    # users with no yesterday report
+    collected = []
+    missing_users = []
 
     for user in users:
         tz = user_tz(user)
         user_yesterday = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
 
         if not db.should_remind_user(user["user_id"], user_yesterday):
-            continue  # was on vacation yesterday, don't count as missing
+            continue
 
         report = db.get_report(user["user_id"], user_yesterday)
         if report:
@@ -126,17 +120,15 @@ async def post_daily_summary(ctx) -> bool:
         print(f"[Summary] Skipped: only {len(collected)} report(s), need >= {min_reports}")
         return False
 
-    # Group by report_date
     by_date = defaultdict(list)
     for report_date, user, report in collected:
         by_date[report_date].append((user, report))
 
-    # Build message
     summary_tz_str = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
     summary_tz = pytz.timezone(summary_tz_str)
     now_str = datetime.now(summary_tz).strftime("%Y-%m-%d %H:%M")
 
-    lines = [f"📊 *Daily Summary*"]
+    lines = [f"📊 *Daily Status*"]
     lines.append(f"_Collected at {esc(now_str)} \\({esc(summary_tz_str)}\\)_\n")
 
     for date_str in sorted(by_date.keys(), reverse=True):
@@ -144,7 +136,7 @@ async def post_daily_summary(ctx) -> bool:
         lines.append(f"📅 *{esc(date_str)}*")
         for user, report in entries:
             name = user_label(user)
-            catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""
+            catch_up = " \\(catch\\-up\\)" if report.get("is_yesterday") else ""
             lines.append(f"  ✅ {esc(name)}{catch_up}")
         lines.append("")
 
@@ -157,11 +149,16 @@ async def post_daily_summary(ctx) -> bool:
     lines.append(f"📈 *Completion: {len(collected)}/{total_expected}*")
 
     try:
-        await ctx.bot.send_message(
-            chat_id=config.CHANNEL_ID,
-            text="\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        send_kwargs = {
+            "chat_id": config.CHANNEL_ID,
+            "text": "\n".join(lines),
+            "parse_mode": ParseMode.MARKDOWN_V2,
+        }
+        topic_id = config.get_topic_id()
+        if topic_id:
+            send_kwargs["message_thread_id"] = topic_id
+
+        await ctx.bot.send_message(**send_kwargs)
         print(f"[Summary] Posted ({len(collected)} reports)")
         return True
     except Exception as e:
