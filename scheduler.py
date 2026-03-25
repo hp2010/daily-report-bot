@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
@@ -11,10 +12,14 @@ from handlers import user_label
 TICK_INTERVAL_SECONDS = 30
 
 
-async def tick(ctx):
-    now_utc = datetime.now(pytz.utc)
+def esc(text: str) -> str:
+    if not text:
+        return ""
+    special = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(special)}])', r'\\\1', str(text))
 
-    # ── Per-user reminders ──
+
+async def tick(ctx):
     users = db.get_active_users()
 
     for user in users:
@@ -56,15 +61,15 @@ async def tick(ctx):
             [InlineKeyboardButton("📝 Write Report", callback_data="write_report")]
         ])
         messages = {
-            1: "⏰ *Good morning!*\n\nTime to write your daily report for today.\nTap the button below or send /report to get started.",
-            2: "⏰ *Second reminder!*\n\nYou haven't submitted today's daily report yet.\nPlease submit ASAP 🙏",
+            1: "⏰ *Good morning\\!*\n\nTime to write your daily report for today\\.\nTap the button below or send /report to get started\\.",
+            2: "⏰ *Second reminder\\!*\n\nYou haven't submitted today's daily report yet\\.\nPlease submit ASAP 🙏",
         }
 
         try:
             await ctx.bot.send_message(
                 chat_id=user["user_id"],
                 text=messages[round_num],
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=keyboard
             )
             db.record_reminder(user["user_id"], user_date, round_num)
@@ -72,7 +77,7 @@ async def tick(ctx):
         except Exception as e:
             print(f"[Tick] Failed to remind {user['user_id']}: {e}")
 
-    # ── Summary check (TODAY's summary, not yesterday's) ──
+    # ── Summary check ──
     summary_time_str = db.get_setting("summary_time", config.DEFAULT_SUMMARY_TIME)
     summary_tz_str = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
     summary_tz = pytz.timezone(summary_tz_str)
@@ -80,7 +85,7 @@ async def tick(ctx):
     summary_hm = summary_now.strftime("%H:%M")
 
     if summary_hm == summary_time_str:
-        summary_date = summary_now.strftime("%Y-%m-%d")  # ← TODAY
+        summary_date = summary_now.strftime("%Y-%m-%d")
         already_key = f"summary_posted_{summary_date}"
 
         conn = db.get_conn()
@@ -94,11 +99,6 @@ async def tick(ctx):
 
 
 async def post_daily_summary(ctx, report_date: str) -> bool:
-    """
-    Post today's summary to the channel.
-    Only posts if submitted count >= summary_min_reports.
-    Returns True if posted, False if skipped.
-    """
     min_reports = int(db.get_setting("summary_min_reports", "2"))
     expected = db.get_active_expected_users(report_date)
     reports = db.get_reports_for_date(report_date)
@@ -109,23 +109,23 @@ async def post_daily_summary(ctx, report_date: str) -> bool:
 
     submitted_ids = {r["user_id"] for r in reports}
 
-    lines = [f"📊 *Daily Summary — {report_date}*\n"]
+    lines = [f"📊 *Daily Summary — {esc(report_date)}*\n"]
 
-    lines.append(f"✅ *Submitted ({len(reports)}/{len(expected)}):*")
+    lines.append(f"✅ *Submitted \\({len(reports)}/{len(expected)}\\):*")
     if reports:
         for r in reports:
             name = r["display_name"] or r["username"] or str(r["user_id"])
-            lines.append(f"  • {name}")
+            lines.append(f"  • {esc(name)}")
     else:
-        lines.append("  (none)")
+        lines.append("  \\(none\\)")
 
     missing = [u for u in expected if u["user_id"] not in submitted_ids]
-    lines.append(f"\n❌ *Missing ({len(missing)}):*")
+    lines.append(f"\n❌ *Missing \\({len(missing)}\\):*")
     if missing:
         for u in missing:
-            lines.append(f"  • {user_label(u)}")
+            lines.append(f"  • {esc(user_label(u))}")
     else:
-        lines.append("  🎉 Everyone submitted!")
+        lines.append("  🎉 Everyone submitted\\!")
 
     lines.append(f"\n📈 *Completion: {len(reports)}/{len(expected)}*")
 
@@ -133,7 +133,7 @@ async def post_daily_summary(ctx, report_date: str) -> bool:
         await ctx.bot.send_message(
             chat_id=config.CHANNEL_ID,
             text="\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         print(f"[Summary] Posted for {report_date}")
         return True
