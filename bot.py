@@ -8,6 +8,7 @@ import config
 import database as db
 from handlers import (
     cmd_start,
+    cmd_debugtopic,
     cmd_report, cmd_yesterday, cmd_update,
     cmd_status, cmd_myreport,
     cmd_vacation, cmd_myschedule,
@@ -33,6 +34,13 @@ async def post_init(app: Application):
 
 def main():
     db.init_db()
+
+    # ── DEBUG: verify config on startup ──
+    print(f"[Config] CHANNEL_ID = {repr(config.CHANNEL_ID)}")
+    print(f"[Config] TOPIC_ID = {repr(config.TOPIC_ID)}")
+    print(f"[Config] get_topic_id() = {repr(config.get_topic_id())}")
+    print(f"[Config] ADMIN_IDS = {config.ADMIN_IDS}")
+
     app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
     # User commands
@@ -45,7 +53,8 @@ def main():
     app.add_handler(CommandHandler("vacation", cmd_vacation))
     app.add_handler(CommandHandler("myschedule", cmd_myschedule))
 
-    # Admin commands
+    # Admin / debug commands
+    app.add_handler(CommandHandler("debugtopic", cmd_debugtopic))
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("removeuser", cmd_removeuser))
     app.add_handler(CommandHandler("rename", cmd_rename))
@@ -58,7 +67,6 @@ def main():
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("setsummary", cmd_setsummary))
     app.add_handler(CommandHandler("settings", cmd_settings))
-    app.add_handler(CommandHandler("debugtopic", cmd_debugtopic))
 
     # Callbacks & text
     app.add_handler(CallbackQueryHandler(handle_callback))

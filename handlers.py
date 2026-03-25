@@ -26,7 +26,6 @@ def user_tz(user_row):
 
 
 def user_tz_abbrev(user_row) -> str:
-    """Get short timezone label like UTC+8, UTC-4, etc."""
     tz = user_tz(user_row)
     now = datetime.now(tz)
     offset = now.utcoffset()
@@ -161,7 +160,7 @@ async def setup_commands(app):
         BotCommand("yesterday", "Submit yesterday's report"),
         BotCommand("update", "Update or delete a report"),
         BotCommand("status", "See who submitted today"),
-        BotCommand("myreport", "View your today's report"),
+        BotCommand("myreport", "View report (today/yesterday)"),
         BotCommand("vacation", "Set your vacation days"),
         BotCommand("myschedule", "View your schedule"),
     ]
@@ -172,7 +171,7 @@ async def setup_commands(app):
         BotCommand("rename", "Rename a user"),
         BotCommand("listusers", "List all active users"),
         BotCommand("remind", "Manually trigger reminders"),
-        BotCommand("summary", "Today's full summary"),
+        BotCommand("summary", "Report summary (today/yesterday/date)"),
         BotCommand("settz", "Set timezone (batch)"),
         BotCommand("setreminders", "Set reminder times (batch)"),
         BotCommand("adminvacation", "Set vacation/duty for anyone"),
@@ -203,12 +202,31 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/yesterday — Submit yesterday's report \\(catch\\-up\\)\n"
         "/update — Update or delete an existing report\n\n"
         "📊 *Viewing*\n"
-        "/myreport — View your today's report\n"
+        "/myreport — View today's report\n"
+        "/myreport yesterday — View yesterday's report\n"
         "/status — See who has submitted today\n\n"
         "🏖️ *Time Off*\n"
         "/vacation — Set your vacation days\n"
         "/myschedule — View your schedule\n\n"
         "Type `/` to see the command menu anytime\\.",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+
+# ──────────────────── /debugtopic ────────────────────
+
+async def cmd_debugtopic(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send /debugtopic in any chat/topic to see its IDs."""
+    msg = update.message
+    await msg.reply_text(
+        f"📍 *Debug Info*\n\n"
+        f"chat\\_id: `{msg.chat.id}`\n"
+        f"message\\_thread\\_id: `{msg.message_thread_id}`\n"
+        f"is\\_topic\\_message: `{msg.is_topic_message}`\n\n"
+        f"⚙️ *Current Config*\n"
+        f"CHANNEL\\_ID: `{config.CHANNEL_ID}`\n"
+        f"TOPIC\\_ID: `{config.TOPIC_ID}`\n"
+        f"get\\_topic\\_id\\(\\): `{config.get_topic_id()}`",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -287,7 +305,6 @@ async def cmd_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
-    # If only one exists, go straight to it
     if today_report and not yesterday_report:
         ctx.user_data["state"] = "awaiting_update"
         ctx.user_data["report_date"] = today
@@ -327,15 +344,36 @@ async def cmd_myreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_active_user(update.effective_user.id):
         return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
-    date = today_for_user(update.effective_user.id)
-    report = db.get_report(update.effective_user.id, date)
+    uid = update.effective_user.id
+
+    if ctx.args and ctx.args[0].lower() in ("yesterday", "y"):
+        date = yesterday_for_user(uid)
+        label = "yesterday"
+    else:
+        date = today_for_user(uid)
+        label = "today"
+
+    report = db.get_report(uid, date)
     if report:
+        catch_up = " \\(catch\\-up\\)" if report.get("is_yesterday") else ""
         await update.message.reply_text(
-            f"📋 *Your report for {esc(date)}:*\n\n{esc(report['content'])}",
+            f"📋 *Your report for {esc(date)}:*{catch_up}\n\n{esc(report['content'])}",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
-        await update.message.reply_text("📭 No report submitted today\\. Use /report to submit\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        if label == "today":
+            await update.message.reply_text(
+                f"📭 No report submitted for {label} \\({esc(date)}\\)\\.\n"
+                f"Use /report to submit\\.\n\n"
+                f"_Tip: use `/myreport yesterday` to check yesterday's\\._",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        else:
+            await update.message.reply_text(
+                f"📭 No report for {label} \\({esc(date)}\\)\\.\n"
+                f"Use /yesterday to submit a catch\\-up\\.",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
 
 
 # ──────────────────── /status ────────────────────
@@ -587,14 +625,47 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-    date = today_for_user(update.effective_user.id)
+
+    uid = update.effective_user.id
+
+    if ctx.args:
+        arg = ctx.args[0].lower()
+        if arg in ("yesterday", "y"):
+            date = yesterday_for_user(uid)
+        elif _is_date_str(ctx.args[0]):
+            date = ctx.args[0]
+        else:
+            return await update.message.reply_text(
+                "Usage:\n"
+                "`/summary` — today\n"
+                "`/summary yesterday` — yesterday\n"
+                "`/summary 2025\\-03\\-20` — specific date",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+    else:
+        date = today_for_user(uid)
+
     reports = db.get_reports_for_date(date)
     if not reports:
-        return await update.message.reply_text(f"📭 No reports for {esc(date)} yet\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return await update.message.reply_text(f"📭 No reports for {esc(date)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
+
+    expected = db.get_active_expected_users(date)
+    submitted_ids = {r["user_id"] for r in reports}
+    missing = [u for u in expected if u["user_id"] not in submitted_ids]
+
     lines = [f"📋 *Report Summary — {esc(date)}*\n"]
     for r in reports:
         name = r["display_name"] or r["username"] or str(r["user_id"])
-        lines.append(f"*{esc(name)}:*\n{esc(r['content'])}\n")
+        catch_up = " \\(catch\\-up\\)" if r.get("is_yesterday") else ""
+        lines.append(f"*{esc(name)}*{catch_up}:\n{esc(r['content'])}\n")
+
+    if missing:
+        lines.append(f"❌ *Missing \\({len(missing)}\\):*")
+        for u in missing:
+            lines.append(f"  • {esc(user_label(u))}")
+        lines.append("")
+
+    lines.append(f"📈 *Completion: {len(reports)}/{len(expected)}*")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
 
@@ -833,6 +904,8 @@ async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📊 Summary min reports: *{esc(summary_min)}*",
         f"🌏 Default TZ: *{esc(config.DEFAULT_TIMEZONE)}*",
         f"⏰ Default reminders: *{esc(config.DEFAULT_FIRST_REMINDER)}* / *{esc(config.DEFAULT_SECOND_REMINDER)}*",
+        f"📡 Channel: `{config.CHANNEL_ID}`",
+        f"💬 Topic ID: `{config.get_topic_id()}`",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -890,7 +963,7 @@ def _date_range(start: str, end: str) -> list:
 
 async def post_report_to_channel(ctx, user_id: int, report_date: str, content: str,
                                   is_yesterday: bool, report_id: int = None):
-    """Post a report to channel, return success bool."""
+    """Post a report to channel (with optional topic), return success bool."""
     db_user = db.get_user(user_id)
     name = db_user["display_name"] if db_user and db_user["display_name"] else str(user_id)
     tz_label = user_tz_abbrev(db_user)
@@ -908,9 +981,17 @@ async def post_report_to_channel(ctx, user_id: int, report_date: str, content: s
     )
 
     try:
-        channel_msg = await ctx.bot.send_message(
-            chat_id=config.CHANNEL_ID, text=channel_text, parse_mode=ParseMode.MARKDOWN_V2
-        )
+        send_kwargs = {
+            "chat_id": config.CHANNEL_ID,
+            "text": channel_text,
+            "parse_mode": ParseMode.MARKDOWN_V2,
+        }
+        topic_id = config.get_topic_id()
+        if topic_id:
+            send_kwargs["message_thread_id"] = topic_id
+
+        channel_msg = await ctx.bot.send_message(**send_kwargs)
+
         if report_id:
             db.update_channel_message_id(report_id, channel_msg.message_id)
         else:
@@ -982,7 +1063,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["state"] = None
 
-    # Re-check is_yesterday flag from the existing report
     existing = db.get_report(user.id, report_date)
     was_yesterday = existing["is_yesterday"] if existing else False
 
@@ -1070,15 +1150,3 @@ async def send_reminders(ctx: ContextTypes.DEFAULT_TYPE, round_num: int = 1) -> 
         except Exception as e:
             print(f"[Reminder] Failed for {user['user_id']}: {e}")
     return count
-
-async def cmd_debugtopic(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    await msg.reply_text(
-        f"chat\\_id: `{msg.chat.id}`\n"
-        f"message\\_thread\\_id: `{msg.message_thread_id}`\n"
-        f"is\\_topic\\_message: `{msg.is_topic_message}`\n\n"
-        f"Config CHANNEL\\_ID: `{config.CHANNEL_ID}`\n"
-        f"Config TOPIC\\_ID: `{config.TOPIC_ID}`\n"
-        f"Config get\\_topic\\_id\\(\\): `{config.get_topic_id()}`",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
