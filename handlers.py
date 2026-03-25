@@ -1070,3 +1070,15 @@ async def send_reminders(ctx: ContextTypes.DEFAULT_TYPE, round_num: int = 1) -> 
         except Exception as e:
             print(f"[Reminder] Failed for {user['user_id']}: {e}")
     return count
+
+async def cmd_debugtopic(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    await msg.reply_text(
+        f"chat\\_id: `{msg.chat.id}`\n"
+        f"message\\_thread\\_id: `{msg.message_thread_id}`\n"
+        f"is\\_topic\\_message: `{msg.is_topic_message}`\n\n"
+        f"Config CHANNEL\\_ID: `{config.CHANNEL_ID}`\n"
+        f"Config TOPIC\\_ID: `{config.TOPIC_ID}`\n"
+        f"Config get\\_topic\\_id\\(\\): `{config.get_topic_id()}`",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )

@@ -58,6 +58,7 @@ def main():
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("setsummary", cmd_setsummary))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("debugtopic", cmd_debugtopic))
 
     # Callbacks & text
     app.add_handler(CallbackQueryHandler(handle_callback))
