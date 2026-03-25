@@ -38,6 +38,7 @@ def init_db():
             content TEXT,
             message_id INTEGER,
             channel_message_id INTEGER,
+            is_yesterday INTEGER DEFAULT 0,
             submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id),
             UNIQUE(user_id, report_date)
@@ -74,10 +75,9 @@ def init_db():
         )
     """)
 
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('weekends_off', '1')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_time', ?)", (config.DEFAULT_SUMMARY_TIME,))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_timezone', ?)", (config.SUMMARY_TIMEZONE,))
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_min_reports', '2')")  # ← NEW
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('summary_min_reports', '2')")
 
     conn.commit()
     conn.close()
@@ -212,6 +212,13 @@ def get_overrides_for_date(date_str: str) -> list:
 
 
 def should_remind_user(user_id: int, date_str: str) -> bool:
+    """
+    Priority:
+    1. Per-user "duty" → MUST remind
+    2. Per-user "vacation" → DO NOT remind
+    3. Global "vacation" → DO NOT remind
+    4. Otherwise → remind
+    """
     overrides = get_overrides_for_date(date_str)
     user_scope = str(user_id)
 
@@ -225,12 +232,6 @@ def should_remind_user(user_id: int, date_str: str) -> bool:
 
     for o in overrides:
         if o["scope"] == "all" and o["type"] == "vacation":
-            return False
-
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    if dt.weekday() in (5, 6):
-        weekends_off = get_setting("weekends_off", "1")
-        if weekends_off == "1":
             return False
 
     return True
@@ -255,13 +256,14 @@ def get_overrides_for_month(year: int, month: int, scope: str = None) -> list:
 
 # ──────────────────── Reports ────────────────────
 
-def save_report(user_id: int, report_date: str, content: str, message_id: int) -> Optional[int]:
+def save_report(user_id: int, report_date: str, content: str, message_id: int,
+                is_yesterday: int = 0) -> Optional[int]:
     conn = get_conn()
     try:
         c = conn.cursor()
         c.execute(
-            "INSERT INTO reports (user_id, report_date, content, message_id) VALUES (?, ?, ?, ?)",
-            (user_id, report_date, content, message_id)
+            "INSERT INTO reports (user_id, report_date, content, message_id, is_yesterday) VALUES (?, ?, ?, ?, ?)",
+            (user_id, report_date, content, message_id, is_yesterday)
         )
         report_id = c.lastrowid
         conn.commit()
@@ -291,6 +293,26 @@ def update_report(user_id: int, report_date: str, content: str) -> Optional[int]
     return old["channel_message_id"]
 
 
+def delete_report(user_id: int, report_date: str) -> Optional[int]:
+    """Delete a report. Returns the channel_message_id so caller can delete from channel."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT channel_message_id FROM reports WHERE user_id = ? AND report_date = ?",
+        (user_id, report_date)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    channel_msg_id = row["channel_message_id"]
+    conn.execute(
+        "DELETE FROM reports WHERE user_id = ? AND report_date = ?",
+        (user_id, report_date)
+    )
+    conn.commit()
+    conn.close()
+    return channel_msg_id
+
+
 def update_channel_message_id(report_id: int, channel_message_id: int):
     conn = get_conn()
     conn.execute("UPDATE reports SET channel_message_id = ? WHERE id = ?", (channel_message_id, report_id))
@@ -308,7 +330,7 @@ def set_channel_message_id_by_user_date(user_id: int, report_date: str, channel_
     conn.close()
 
 
-def get_today_report(user_id: int, report_date: str):
+def get_report(user_id: int, report_date: str):
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM reports WHERE user_id = ? AND report_date = ?",
@@ -345,7 +367,7 @@ def get_unsubmitted_users(report_date: str) -> list:
 def get_reports_for_date(report_date: str) -> list:
     conn = get_conn()
     rows = conn.execute(
-        """SELECT r.*, u.display_name, u.username
+        """SELECT r.*, u.display_name, u.username, u.timezone
            FROM reports r
            JOIN users u ON r.user_id = u.user_id
            WHERE r.report_date = ?

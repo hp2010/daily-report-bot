@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
 import re
 import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -7,7 +8,7 @@ from telegram.constants import ParseMode
 
 import config
 import database as db
-from handlers import user_label
+from handlers import user_label, user_tz
 
 TICK_INTERVAL_SECONDS = 30
 
@@ -22,17 +23,16 @@ def esc(text: str) -> str:
 async def tick(ctx):
     users = db.get_active_users()
 
+    # ── Per-user reminders ──
     for user in users:
-        user_tz = pytz.timezone(user["timezone"] or config.DEFAULT_TIMEZONE)
-        user_now = datetime.now(user_tz)
+        user_timezone = pytz.timezone(user["timezone"] or config.DEFAULT_TIMEZONE)
+        user_now = datetime.now(user_timezone)
         user_date = user_now.strftime("%Y-%m-%d")
         user_hm = user_now.strftime("%H:%M")
 
         if not db.should_remind_user(user["user_id"], user_date):
             continue
-
-        existing = db.get_today_report(user["user_id"], user_date)
-        if existing:
+        if db.get_report(user["user_id"], user_date):
             continue
 
         first = user["first_reminder"] or config.DEFAULT_FIRST_REMINDER
@@ -43,7 +43,6 @@ async def tick(ctx):
             round_num = 1
         elif user_hm == second:
             round_num = 2
-
         if round_num is None:
             continue
 
@@ -53,7 +52,6 @@ async def tick(ctx):
             (user["user_id"], user_date, round_num)
         ).fetchone()
         conn.close()
-
         if already:
             continue
 
@@ -64,7 +62,6 @@ async def tick(ctx):
             1: "⏰ *Good morning\\!*\n\nTime to write your daily report for today\\.\nTap the button below or send /report to get started\\.",
             2: "⏰ *Second reminder\\!*\n\nYou haven't submitted today's daily report yet\\.\nPlease submit ASAP 🙏",
         }
-
         try:
             await ctx.bot.send_message(
                 chat_id=user["user_id"],
@@ -85,58 +82,87 @@ async def tick(ctx):
     summary_hm = summary_now.strftime("%H:%M")
 
     if summary_hm == summary_time_str:
-        summary_date = summary_now.strftime("%Y-%m-%d")
-        already_key = f"summary_posted_{summary_date}"
+        summary_key_date = summary_now.strftime("%Y-%m-%d")
+        already_key = f"summary_posted_{summary_key_date}"
 
         conn = db.get_conn()
         already = conn.execute("SELECT 1 FROM settings WHERE key = ?", (already_key,)).fetchone()
         conn.close()
 
         if not already:
-            posted = await post_daily_summary(ctx, summary_date)
+            posted = await post_daily_summary(ctx)
             if posted:
                 db.set_setting(already_key, "1")
 
 
-async def post_daily_summary(ctx, report_date: str) -> bool:
+async def post_daily_summary(ctx) -> bool:
+    """
+    Collect each user's "yesterday" report (per their own timezone).
+    Group by report_date, display grouped.
+    """
     min_reports = int(db.get_setting("summary_min_reports", "2"))
-    expected = db.get_active_expected_users(report_date)
-    reports = db.get_reports_for_date(report_date)
+    users = db.get_active_users()
 
-    if len(reports) < min_reports:
-        print(f"[Summary] Skipped {report_date}: only {len(reports)} report(s), need >= {min_reports}")
+    # Collect per-user yesterday's report
+    collected = []        # list of (report_date, user_row, report_row)
+    missing_users = []    # users with no yesterday report
+
+    for user in users:
+        tz = user_tz(user)
+        user_yesterday = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        if not db.should_remind_user(user["user_id"], user_yesterday):
+            continue  # was on vacation yesterday, don't count as missing
+
+        report = db.get_report(user["user_id"], user_yesterday)
+        if report:
+            collected.append((user_yesterday, user, report))
+        else:
+            missing_users.append(user)
+
+    total_expected = len(collected) + len(missing_users)
+
+    if len(collected) < min_reports:
+        print(f"[Summary] Skipped: only {len(collected)} report(s), need >= {min_reports}")
         return False
 
-    submitted_ids = {r["user_id"] for r in reports}
+    # Group by report_date
+    by_date = defaultdict(list)
+    for report_date, user, report in collected:
+        by_date[report_date].append((user, report))
 
-    lines = [f"📊 *Daily Summary — {esc(report_date)}*\n"]
+    # Build message
+    summary_tz_str = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
+    summary_tz = pytz.timezone(summary_tz_str)
+    now_str = datetime.now(summary_tz).strftime("%Y-%m-%d %H:%M")
 
-    lines.append(f"✅ *Submitted \\({len(reports)}/{len(expected)}\\):*")
-    if reports:
-        for r in reports:
-            name = r["display_name"] or r["username"] or str(r["user_id"])
-            lines.append(f"  • {esc(name)}")
-    else:
-        lines.append("  \\(none\\)")
+    lines = [f"📊 *Daily Summary*"]
+    lines.append(f"_Collected at {esc(now_str)} \\({esc(summary_tz_str)}\\)_\n")
 
-    missing = [u for u in expected if u["user_id"] not in submitted_ids]
-    lines.append(f"\n❌ *Missing \\({len(missing)}\\):*")
-    if missing:
-        for u in missing:
+    for date_str in sorted(by_date.keys(), reverse=True):
+        entries = by_date[date_str]
+        lines.append(f"📅 *{esc(date_str)}*")
+        for user, report in entries:
+            name = user_label(user)
+            catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""
+            lines.append(f"  ✅ {esc(name)}{catch_up}")
+        lines.append("")
+
+    if missing_users:
+        lines.append(f"❌ *Missing \\({len(missing_users)}\\):*")
+        for u in missing_users:
             lines.append(f"  • {esc(user_label(u))}")
-    else:
-        lines.append("  🎉 Everyone submitted\\!")
+        lines.append("")
 
-    lines.append(f"\n📈 *Completion: {len(reports)}/{len(expected)}*")
+    lines.append(f"📈 *Completion: {len(collected)}/{total_expected}*")
 
     try:
         await ctx.bot.send_message(
             chat_id=config.CHANNEL_ID,
             text="\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN_V2,
-	message_thread_id=config.TOPIC_ID 
+            parse_mode=ParseMode.MARKDOWN_V2
         )
-        print(f"[Summary] Posted for {report_date}")
+        print(f"[Summary] Posted ({len(collected)} reports)")
         return True
     except Exception as e:
         print(f"[Summary] Failed: {e}")

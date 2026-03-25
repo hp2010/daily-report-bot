@@ -8,12 +8,13 @@ import config
 import database as db
 from handlers import (
     cmd_start,
+    cmd_report, cmd_yesterday, cmd_update,
+    cmd_status, cmd_myreport,
+    cmd_vacation, cmd_myschedule,
     cmd_adduser, cmd_removeuser, cmd_rename,
-    cmd_listusers,
-    cmd_report, cmd_update, cmd_status, cmd_myreport,
-    cmd_summary, cmd_remind,
+    cmd_listusers, cmd_remind, cmd_summary,
     cmd_settz, cmd_setreminders,
-    cmd_vacation, cmd_schedule,
+    cmd_adminvacation, cmd_schedule,
     cmd_setsummary, cmd_settings,
     handle_text, handle_callback,
     setup_commands,
@@ -37,9 +38,12 @@ def main():
     # User commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("myreport", cmd_myreport))
+    app.add_handler(CommandHandler("vacation", cmd_vacation))
+    app.add_handler(CommandHandler("myschedule", cmd_myschedule))
 
     # Admin commands
     app.add_handler(CommandHandler("adduser", cmd_adduser))
@@ -50,7 +54,7 @@ def main():
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("settz", cmd_settz))
     app.add_handler(CommandHandler("setreminders", cmd_setreminders))
-    app.add_handler(CommandHandler("vacation", cmd_vacation))
+    app.add_handler(CommandHandler("adminvacation", cmd_adminvacation))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("setsummary", cmd_setsummary))
     app.add_handler(CommandHandler("settings", cmd_settings))

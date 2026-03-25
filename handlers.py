@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from collections import defaultdict
 import re
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -12,7 +13,6 @@ import database as db
 # ──────────────────── Escape helper ────────────────────
 
 def esc(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
     if not text:
         return ""
     special = r'_*[]()~`>#+-=|{}.!'
@@ -25,15 +25,29 @@ def user_tz(user_row):
     return pytz.timezone(user_row["timezone"] if user_row else config.DEFAULT_TIMEZONE)
 
 
+def user_tz_abbrev(user_row) -> str:
+    """Get short timezone label like UTC+8, UTC-4, etc."""
+    tz = user_tz(user_row)
+    now = datetime.now(tz)
+    offset = now.utcoffset()
+    total_seconds = int(offset.total_seconds())
+    hours = total_seconds // 3600
+    minutes = abs(total_seconds) % 3600 // 60
+    if minutes:
+        return f"UTC{hours:+d}:{minutes:02d}"
+    return f"UTC{hours:+d}"
+
+
 def today_for_user(user_id: int) -> str:
     u = db.get_user(user_id)
     tz = user_tz(u)
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
-def today_for_tz(timezone_str: str) -> str:
-    tz = pytz.timezone(timezone_str)
-    return datetime.now(tz).strftime("%Y-%m-%d")
+def yesterday_for_user(user_id: int) -> str:
+    u = db.get_user(user_id)
+    tz = user_tz(u)
+    return (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def now_for_user(user_id: int) -> str:
@@ -81,17 +95,12 @@ async def resolve_user(identifier: str, update: Update) -> dict | None:
             return dict(user)
     except ValueError:
         pass
-
     matches = db.find_users_by_name(identifier, active_only=False)
     if len(matches) == 0:
-        await update.message.reply_text(
-            f"❌ No user found matching `{esc(identifier)}`\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await update.message.reply_text(f"❌ No user found matching `{esc(identifier)}`\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return None
     if len(matches) == 1:
         return dict(matches[0])
-
     lines = [f"⚠️ Multiple users match `{esc(identifier)}`\\. Please be more specific:\n"]
     for m in matches:
         status = "✅" if m["is_active"] else "❌ inactive"
@@ -109,17 +118,12 @@ async def resolve_active_user(identifier: str, update: Update) -> dict | None:
             return dict(user)
     except ValueError:
         pass
-
     matches = db.find_users_by_name(identifier, active_only=True)
     if len(matches) == 0:
-        await update.message.reply_text(
-            f"❌ No active user found matching `{esc(identifier)}`\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await update.message.reply_text(f"❌ No active user found matching `{esc(identifier)}`\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return None
     if len(matches) == 1:
         return dict(matches[0])
-
     lines = [f"⚠️ Multiple active users match `{esc(identifier)}`\\. Please be more specific:\n"]
     for m in matches:
         lines.append(f"• *{esc(user_label(m))}* — `{m['user_id']}`")
@@ -135,12 +139,10 @@ async def resolve_multiple_users(raw: str, update: Update) -> list | None:
             await update.message.reply_text("📭 No active users\\.", parse_mode=ParseMode.MARKDOWN_V2)
             return None
         return [dict(u) for u in users]
-
     identifiers = [s.strip() for s in raw.split(",") if s.strip()]
     if not identifiers:
         await update.message.reply_text("❌ No users specified\\.", parse_mode=ParseMode.MARKDOWN_V2)
         return None
-
     results = []
     for ident in identifiers:
         user = await resolve_active_user(ident, update)
@@ -154,9 +156,10 @@ async def resolve_multiple_users(raw: str, update: Update) -> list | None:
 
 async def setup_commands(app):
     user_commands = [
-        BotCommand("start", "About this bot"),
+        BotCommand("start", "About this bot & command guide"),
         BotCommand("report", "Submit today's report"),
-        BotCommand("update", "Update today's report"),
+        BotCommand("yesterday", "Submit yesterday's report"),
+        BotCommand("update", "Update or delete a report"),
         BotCommand("status", "See who submitted today"),
         BotCommand("myreport", "View your today's report"),
         BotCommand("vacation", "Set your vacation days"),
@@ -179,7 +182,6 @@ async def setup_commands(app):
     ]
 
     from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeChat
-
     await app.bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
     for admin_id in config.ADMIN_IDS:
         try:
@@ -196,27 +198,39 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to the Daily Report Bot\\!*\n\n"
         "I'll remind you to write your daily report every day "
         "and sync all reports to the onboarding channel\\.\n\n"
-        "Type `/` to see all available commands\\.",
+        "📝 *Writing Reports*\n"
+        "/report — Submit today's daily report\n"
+        "/yesterday — Submit yesterday's report \\(catch\\-up\\)\n"
+        "/update — Update or delete an existing report\n\n"
+        "📊 *Viewing*\n"
+        "/myreport — View your today's report\n"
+        "/status — See who has submitted today\n\n"
+        "🏖️ *Time Off*\n"
+        "/vacation — Set your vacation days\n"
+        "/myschedule — View your schedule\n\n"
+        "Type `/` to see the command menu anytime\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
 
-# ──────────────────── User commands ────────────────────
+# ──────────────────── /report ────────────────────
 
 async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_active_user(update.effective_user.id):
         return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     date = today_for_user(update.effective_user.id)
-    existing = db.get_today_report(update.effective_user.id, date)
+    existing = db.get_report(update.effective_user.id, date)
     if existing:
         return await update.message.reply_text(
             f"📋 You already submitted today's report\\.\n\n"
             f"_{esc(existing['content'])}_\n\n"
-            f"Use /update to modify it\\.",
+            f"Use /update to modify or delete it\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     ctx.user_data["state"] = "awaiting_report"
+    ctx.user_data["report_date"] = date
+    ctx.user_data["is_yesterday"] = False
     await update.message.reply_text(
         f"📝 *Daily Report — {esc(date)}*\n\n"
         f"Please type your report below\\.\n\n"
@@ -229,29 +243,92 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ──────────────────── /yesterday ────────────────────
+
+async def cmd_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_active_user(update.effective_user.id):
+        return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
+
+    date = yesterday_for_user(update.effective_user.id)
+    existing = db.get_report(update.effective_user.id, date)
+    if existing:
+        return await update.message.reply_text(
+            f"📋 You already submitted a report for {esc(date)}\\.\n\n"
+            f"_{esc(existing['content'])}_\n\n"
+            f"Use /update to modify or delete it\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    ctx.user_data["state"] = "awaiting_report"
+    ctx.user_data["report_date"] = date
+    ctx.user_data["is_yesterday"] = True
+    await update.message.reply_text(
+        f"📝 *Yesterday's Report — {esc(date)}*\n\n"
+        f"Please type your report for yesterday below 👇",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+
+# ──────────────────── /update ────────────────────
+
 async def cmd_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_active_user(update.effective_user.id):
         return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
-    date = today_for_user(update.effective_user.id)
-    existing = db.get_today_report(update.effective_user.id, date)
-    if not existing:
-        return await update.message.reply_text("📭 No report yet\\. Use /report first\\.", parse_mode=ParseMode.MARKDOWN_V2)
-    ctx.user_data["state"] = "awaiting_update"
+    uid = update.effective_user.id
+    today = today_for_user(uid)
+    yesterday = yesterday_for_user(uid)
+
+    today_report = db.get_report(uid, today)
+    yesterday_report = db.get_report(uid, yesterday)
+
+    if not today_report and not yesterday_report:
+        return await update.message.reply_text(
+            "📭 No reports to update\\. Use /report or /yesterday first\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+    # If only one exists, go straight to it
+    if today_report and not yesterday_report:
+        ctx.user_data["state"] = "awaiting_update"
+        ctx.user_data["report_date"] = today
+        return await update.message.reply_text(
+            f"✏️ *Update Report — {esc(today)}*\n\n"
+            f"Current:\n_{esc(today_report['content'])}_\n\n"
+            f"Send updated report below, or type `delete` to remove it 👇",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+    if yesterday_report and not today_report:
+        ctx.user_data["state"] = "awaiting_update"
+        ctx.user_data["report_date"] = yesterday
+        return await update.message.reply_text(
+            f"✏️ *Update Report — {esc(yesterday)}*\n\n"
+            f"Current:\n_{esc(yesterday_report['content'])}_\n\n"
+            f"Send updated report below, or type `delete` to remove it 👇",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+    # Both exist — let user choose
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"Today ({today})", callback_data=f"update_{today}"),
+            InlineKeyboardButton(f"Yesterday ({yesterday})", callback_data=f"update_{yesterday}"),
+        ]
+    ])
     await update.message.reply_text(
-        f"✏️ *Update Report — {esc(date)}*\n\n"
-        f"Current:\n_{esc(existing['content'])}_\n\n"
-        f"Send updated report below 👇",
-        parse_mode=ParseMode.MARKDOWN_V2
+        "Which report do you want to update?",
+        reply_markup=keyboard
     )
 
+
+# ──────────────────── /myreport ────────────────────
 
 async def cmd_myreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_active_user(update.effective_user.id):
         return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     date = today_for_user(update.effective_user.id)
-    report = db.get_today_report(update.effective_user.id, date)
+    report = db.get_report(update.effective_user.id, date)
     if report:
         await update.message.reply_text(
             f"📋 *Your report for {esc(date)}:*\n\n{esc(report['content'])}",
@@ -260,6 +337,8 @@ async def cmd_myreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("📭 No report submitted today\\. Use /report to submit\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
+
+# ──────────────────── /status ────────────────────
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_active_user(update.effective_user.id):
@@ -292,7 +371,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
 
-# ──── /vacation (user: set own vacation) ────
+# ──────────────────── /vacation (user) ────────────────────
 
 async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -338,7 +417,6 @@ async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dates = _date_range(start, end)
     for d in dates:
         db.add_override(scope, d, "vacation", note="self-service vacation")
-
     await update.message.reply_text(
         f"🏖️ Vacation set: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.\n\n"
         f"Use `/myschedule` to view your schedule\\.",
@@ -346,7 +424,7 @@ async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ──── /myschedule ────
+# ──────────────────── /myschedule ────────────────────
 
 async def cmd_myschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -355,7 +433,6 @@ async def cmd_myschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.now(pytz.timezone(config.DEFAULT_TIMEZONE))
     year, month = now.year, now.month
-
     if ctx.args:
         try:
             parts = ctx.args[0].split("-")
@@ -366,7 +443,6 @@ async def cmd_myschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     scope = str(uid)
     user_overrides = db.get_overrides_for_month(year, month, scope=scope)
     global_overrides = db.get_overrides_for_month(year, month, scope="all")
-    weekends_off = db.get_setting("weekends_off", "1") == "1"
 
     db_user = db.get_user(uid)
     name = user_label(db_user) if db_user else str(uid)
@@ -374,11 +450,7 @@ async def cmd_myschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"📅 *Your Schedule — {year:04d}\\-{month:02d}*"]
     lines.append(f"👤 {esc(name)}\n")
 
-    if weekends_off:
-        lines.append("⚙️ Weekends off: *ON* \\(default\\)\n")
-
     has_any = False
-
     if global_overrides:
         has_any = True
         lines.append("*Team\\-wide:*")
@@ -412,30 +484,21 @@ async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "`/adduser 123456 Alice, 789012 Bob, 345678 Charlie`",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     raw = " ".join(ctx.args)
     entries = [e.strip() for e in raw.split(",") if e.strip()]
     added = []
-
     for entry in entries:
         parts = entry.split(None, 1)
         try:
             uid = int(parts[0])
         except ValueError:
-            await update.message.reply_text(
-                f"❌ Skipped `{esc(entry)}` — first part must be a numeric ID\\.",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            await update.message.reply_text(f"❌ Skipped `{esc(entry)}` — first part must be a numeric ID\\.", parse_mode=ParseMode.MARKDOWN_V2)
             continue
         name = parts[1] if len(parts) > 1 else str(uid)
         db.add_user(uid, display_name=name)
         added.append(f"• *{esc(name)}* \\(`{uid}`\\)")
-
     if added:
-        await update.message.reply_text(
-            f"✅ Added {len(added)} user\\(s\\):\n" + "\n".join(added),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await update.message.reply_text(f"✅ Added {len(added)} user\\(s\\):\n" + "\n".join(added), parse_mode=ParseMode.MARKDOWN_V2)
     else:
         await update.message.reply_text("❌ No users added\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -451,23 +514,19 @@ async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "`/removeuser all` — remove everyone",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     raw = " ".join(ctx.args)
     if raw.strip().lower() == "all":
         users = db.get_active_users()
         for u in users:
             db.remove_user(u["user_id"])
         return await update.message.reply_text(f"✅ Removed all {len(users)} active users\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     users = await resolve_multiple_users(raw, update)
     if not users:
         return
-
     removed = []
     for u in users:
         db.remove_user(u["user_id"])
         removed.append(f"• *{esc(user_label(u))}* \\(`{u['user_id']}`\\)")
-
     await update.message.reply_text(
         f"✅ Removed {len(removed)} user\\(s\\):\n" + "\n".join(removed) + "\n\nTheir reports are now hidden\\.",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -483,24 +542,17 @@ async def cmd_rename(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Example:\n`/rename Alice :: Alice Wang`\n`/rename 123456 :: Bob Chen`",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     raw = " ".join(ctx.args)
     if "::" not in raw:
-        return await update.message.reply_text(
-            "❌ Use `::` to separate old and new name\\.\nExample: `/rename Alice :: Alice Wang`",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
+        return await update.message.reply_text("❌ Use `::` to separate old and new name\\.", parse_mode=ParseMode.MARKDOWN_V2)
     parts = raw.split("::", 1)
     identifier = parts[0].strip()
     new_name = parts[1].strip()
     if not new_name:
         return await update.message.reply_text("❌ New name cannot be empty\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     user = await resolve_user(identifier, update)
     if not user:
         return
-
     old_name = user_label(user)
     db.rename_user(user["user_id"], new_name)
     await update.message.reply_text(
@@ -512,11 +564,9 @@ async def cmd_rename(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_listusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     users = db.get_active_users()
     if not users:
         return await update.message.reply_text("📭 No active users\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     lines = ["👥 *Active Users*\n"]
     for u in users:
         tz_str = u["timezone"] or config.DEFAULT_TIMEZONE
@@ -537,12 +587,10 @@ async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     date = today_for_user(update.effective_user.id)
     reports = db.get_reports_for_date(date)
     if not reports:
         return await update.message.reply_text(f"📭 No reports for {esc(date)} yet\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     lines = [f"📋 *Report Summary — {esc(date)}*\n"]
     for r in reports:
         name = r["display_name"] or r["username"] or str(r["user_id"])
@@ -567,21 +615,17 @@ async def cmd_settz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "• `America/Los_Angeles` \\(UTC\\-8\\)",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     tz_str = ctx.args[-1]
     try:
         pytz.timezone(tz_str)
     except pytz.exceptions.UnknownTimeZoneError:
         return await update.message.reply_text(f"❌ Unknown timezone: `{esc(tz_str)}`", parse_mode=ParseMode.MARKDOWN_V2)
-
     names_raw = " ".join(ctx.args[:-1])
     users = await resolve_multiple_users(names_raw, update)
     if not users:
         return
-
     for u in users:
         db.update_user_timezone(u["user_id"], tz_str)
-
     names = ", ".join(f"*{esc(user_label(u))}*" for u in users)
     await update.message.reply_text(
         f"✅ Timezone set to `{esc(tz_str)}` for {len(users)} user\\(s\\): {names}",
@@ -601,22 +645,18 @@ async def cmd_setreminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Times are in each user's local timezone\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     t2_str = ctx.args[-1]
     t1_str = ctx.args[-2]
     t1 = parse_time_str(t1_str)
     t2 = parse_time_str(t2_str)
     if not t1 or not t2:
         return await update.message.reply_text("❌ Invalid time format\\. Use `HH:MM`\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     names_raw = " ".join(ctx.args[:-2])
     users = await resolve_multiple_users(names_raw, update)
     if not users:
         return
-
     for u in users:
         db.update_user_reminders(u["user_id"], first_reminder=t1_str, second_reminder=t2_str)
-
     names = ", ".join(f"*{esc(user_label(u))}*" for u in users)
     await update.message.reply_text(
         f"✅ Reminders set to `{esc(t1_str)}` / `{esc(t2_str)}` for {len(users)} user\\(s\\): {names}",
@@ -624,12 +664,9 @@ async def cmd_setreminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ──── /adminvacation ────
-
 async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     if len(ctx.args) < 2:
         return await update.message.reply_text(
             "*Admin Vacation & Duty management*\n\n"
@@ -639,24 +676,18 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "User vacation:\n"
             "`/adminvacation Alice 2025\\-01\\-20`\n"
             "`/adminvacation Alice, Bob 2025\\-01\\-20 2025\\-01\\-24`\n\n"
-            "Duty \\(overrides weekend/holiday\\):\n"
-            "`/adminvacation duty Alice 2025\\-01\\-25`\n"
-            "`/adminvacation duty Alice, Bob 2025\\-01\\-25 2025\\-01\\-26`\n\n"
+            "Duty \\(overrides holidays\\):\n"
+            "`/adminvacation duty Alice 2025\\-01\\-25`\n\n"
             "Remove override:\n"
             "`/adminvacation remove all 2025\\-01\\-20`\n"
-            "`/adminvacation remove Alice 2025\\-01\\-20`\n"
             "`/adminvacation remove Alice 2025\\-01\\-20 2025\\-01\\-24`",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     args = list(ctx.args)
 
     if args[0].lower() == "remove":
         if len(args) < 3:
-            return await update.message.reply_text(
-                "Usage: `/adminvacation remove <name\\(s\\)/all> <date> [end_date]`",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            return await update.message.reply_text("Usage: `/adminvacation remove <name\\(s\\)/all> <date> [end]`", parse_mode=ParseMode.MARKDOWN_V2)
         dates_args, name_args = _split_dates_from_end(args[1:])
         if not dates_args or not name_args:
             return await update.message.reply_text("❌ Could not parse\\. Put dates at the end\\.", parse_mode=ParseMode.MARKDOWN_V2)
@@ -678,13 +709,10 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if args[0].lower() == "duty":
         if len(args) < 3:
-            return await update.message.reply_text(
-                "Usage: `/adminvacation duty <name\\(s\\)> <date> [end_date]`",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            return await update.message.reply_text("Usage: `/adminvacation duty <name\\(s\\)> <date> [end]`", parse_mode=ParseMode.MARKDOWN_V2)
         dates_args, name_args = _split_dates_from_end(args[1:])
         if not dates_args or not name_args:
-            return await update.message.reply_text("❌ Could not parse\\. Put dates at the end\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return await update.message.reply_text("❌ Could not parse\\.", parse_mode=ParseMode.MARKDOWN_V2)
         scope_raw = " ".join(name_args)
         scopes, labels = await _resolve_scopes_with_labels(scope_raw, update)
         if scopes is None:
@@ -702,32 +730,26 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     dates_args, name_args = _split_dates_from_end(args)
     if not dates_args or not name_args:
-        return await update.message.reply_text("❌ Could not parse\\. Put dates at the end\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
+        return await update.message.reply_text("❌ Could not parse\\.", parse_mode=ParseMode.MARKDOWN_V2)
     scope_raw = " ".join(name_args)
     scopes, labels = await _resolve_scopes_with_labels(scope_raw, update)
     if scopes is None:
         return
-
     start = dates_args[0]
     end = dates_args[1] if len(dates_args) > 1 else start
     dates = _date_range(start, end)
     for scope in scopes:
         for d in dates:
             db.add_override(scope, d, "vacation", note="admin set vacation")
-
     await update.message.reply_text(
         f"🏖️ Vacation set for {labels}: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
 
-# ──── /schedule ────
-
 async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     now = datetime.now(pytz.timezone(config.DEFAULT_TIMEZONE))
     year, month = now.year, now.month
     if ctx.args:
@@ -736,13 +758,8 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             year, month = int(parts[0]), int(parts[1])
         except (ValueError, IndexError):
             return await update.message.reply_text("Usage: `/schedule [YYYY\\-MM]`", parse_mode=ParseMode.MARKDOWN_V2)
-
     overrides = db.get_overrides_for_month(year, month)
-    weekends_off = db.get_setting("weekends_off", "1") == "1"
-
     lines = [f"📅 *Schedule — {year:04d}\\-{month:02d}*\n"]
-    lines.append(f"⚙️ Weekends off: *{'ON' if weekends_off else 'OFF'}*\n")
-
     if overrides:
         lines.append("*Overrides:*")
         for o in overrides:
@@ -758,14 +775,12 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  {icon} {esc(o['date'])} — {esc(scope_label)} \\({esc(o['type'])}\\)")
     else:
         lines.append("No overrides this month\\.")
-
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     if not ctx.args:
         current_time = db.get_setting("summary_time", config.DEFAULT_SUMMARY_TIME)
         current_tz = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
@@ -778,7 +793,6 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Set threshold: `/setsummary min 3`",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     if ctx.args[0].lower() == "min":
         if len(ctx.args) < 2:
             return await update.message.reply_text("Usage: `/setsummary min <number>`", parse_mode=ParseMode.MARKDOWN_V2)
@@ -789,15 +803,10 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             return await update.message.reply_text("❌ Must be a non\\-negative number\\.", parse_mode=ParseMode.MARKDOWN_V2)
         db.set_setting("summary_min_reports", str(n))
-        return await update.message.reply_text(
-            f"✅ Summary will only post when ≥ `{n}` report\\(s\\) submitted\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
+        return await update.message.reply_text(f"✅ Summary will only post when ≥ `{n}` report\\(s\\) submitted\\.", parse_mode=ParseMode.MARKDOWN_V2)
     t = parse_time_str(ctx.args[0])
     if not t:
         return await update.message.reply_text("❌ Invalid time\\. Use `HH:MM`\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
     db.set_setting("summary_time", ctx.args[0])
     if len(ctx.args) > 1:
         tz_str = ctx.args[1]
@@ -806,7 +815,6 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except pytz.exceptions.UnknownTimeZoneError:
             return await update.message.reply_text(f"❌ Unknown timezone: `{esc(tz_str)}`", parse_mode=ParseMode.MARKDOWN_V2)
         db.set_setting("summary_timezone", tz_str)
-
     await update.message.reply_text(
         f"✅ Summary time set to `{esc(ctx.args[0])}` \\({esc(db.get_setting('summary_timezone'))}\\)\\.",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -816,15 +824,11 @@ async def cmd_setsummary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ Admin only\\.", parse_mode=ParseMode.MARKDOWN_V2)
-
-    weekends = "ON" if db.get_setting("weekends_off", "1") == "1" else "OFF"
     summary_t = db.get_setting("summary_time", config.DEFAULT_SUMMARY_TIME)
     summary_tz = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
     summary_min = db.get_setting("summary_min_reports", "2")
-
     lines = [
         "⚙️ *Current Settings*\n",
-        f"📅 Weekends off: *{weekends}*",
         f"📊 Summary time: *{esc(summary_t)}* \\({esc(summary_tz)}\\)",
         f"📊 Summary min reports: *{esc(summary_min)}*",
         f"🌏 Default TZ: *{esc(config.DEFAULT_TIMEZONE)}*",
@@ -849,8 +853,7 @@ def _split_dates_from_end(args: list) -> tuple:
     while i >= 0 and _is_date_str(args[i]):
         dates.insert(0, args[i])
         i -= 1
-    name_args = args[:i + 1]
-    return (dates, name_args)
+    return (dates, args[:i + 1])
 
 
 async def _resolve_scopes(scope_raw: str, update: Update) -> list | None:
@@ -883,6 +886,41 @@ def _date_range(start: str, end: str) -> list:
     return dates
 
 
+# ──────────────── Channel post helper ────────────────
+
+async def post_report_to_channel(ctx, user_id: int, report_date: str, content: str,
+                                  is_yesterday: bool, report_id: int = None):
+    """Post a report to channel, return success bool."""
+    db_user = db.get_user(user_id)
+    name = db_user["display_name"] if db_user and db_user["display_name"] else str(user_id)
+    tz_label = user_tz_abbrev(db_user)
+    time_str = now_for_user(user_id)
+
+    yesterday_tag = " \\(catch\\-up\\)" if is_yesterday else ""
+
+    channel_text = (
+        f"📋 *Daily Report — {esc(report_date)}*{yesterday_tag}\n"
+        f"👤 *{esc(name)}*\n"
+        f"{'─' * 24}\n\n"
+        f"{esc(content)}\n\n"
+        f"{'─' * 24}\n"
+        f"🕐 {esc(time_str)} \\({esc(tz_label)}\\)"
+    )
+
+    try:
+        channel_msg = await ctx.bot.send_message(
+            chat_id=config.CHANNEL_ID, text=channel_text, parse_mode=ParseMode.MARKDOWN_V2
+        )
+        if report_id:
+            db.update_channel_message_id(report_id, channel_msg.message_id)
+        else:
+            db.set_channel_message_id_by_user_date(user_id, report_date, channel_msg.message_id)
+        return True
+    except Exception as e:
+        print(f"[Channel] Failed to post for {user_id}: {e}")
+        return False
+
+
 # ──────────────────── Text message handler ────────────────────
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -896,51 +934,62 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["state"] = None
         return await update.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
-    date = today_for_user(user.id)
     content = update.message.text
-    name = db_user["display_name"] if db_user["display_name"] else get_display_name(user)
+    report_date = ctx.user_data.get("report_date", today_for_user(user.id))
+    is_yesterday = ctx.user_data.get("is_yesterday", False)
 
-    if state == "awaiting_report":
-        report_id = db.save_report(user.id, date, content, update.message.message_id)
-        if report_id is None:
-            ctx.user_data["state"] = None
-            return await update.message.reply_text("⚠️ Already submitted today\\. Use /update to modify\\.", parse_mode=ParseMode.MARKDOWN_V2)
-    else:
-        old_channel_msg_id = db.update_report(user.id, date, content)
-        report_id = None
-        if old_channel_msg_id:
+    # ── DELETE flow ──
+    if state == "awaiting_update" and content.strip().lower() == "delete":
+        ctx.user_data["state"] = None
+        channel_msg_id = db.delete_report(user.id, report_date)
+        if channel_msg_id:
             try:
-                await ctx.bot.delete_message(chat_id=config.CHANNEL_ID, message_id=old_channel_msg_id)
+                await ctx.bot.delete_message(chat_id=config.CHANNEL_ID, message_id=channel_msg_id)
             except Exception:
                 pass
+        await update.message.reply_text(
+            f"🗑️ Report for {esc(report_date)} deleted\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    # ── NEW REPORT ──
+    if state == "awaiting_report":
+        report_id = db.save_report(user.id, report_date, content, update.message.message_id,
+                                    is_yesterday=1 if is_yesterday else 0)
+        if report_id is None:
+            ctx.user_data["state"] = None
+            return await update.message.reply_text(
+                f"⚠️ Already submitted for {esc(report_date)}\\. Use /update to modify\\.",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        ctx.user_data["state"] = None
+        synced = await post_report_to_channel(ctx, user.id, report_date, content, is_yesterday, report_id)
+        tag = " and synced to channel" if synced else " \\(channel sync failed\\)"
+        await update.message.reply_text(
+            f"✅ Report submitted{esc(tag)}\\!\n\nUse /update anytime to modify or delete\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    # ── UPDATE REPORT ──
+    old_channel_msg_id = db.update_report(user.id, report_date, content)
+    if old_channel_msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id=config.CHANNEL_ID, message_id=old_channel_msg_id)
+        except Exception:
+            pass
 
     ctx.user_data["state"] = None
 
-    channel_text = (
-        f"📋 *Daily Report — {esc(date)}*\n"
-        f"👤 *{esc(name)}*\n"
-        f"{'─' * 24}\n\n"
-        f"{esc(content)}\n\n"
-        f"{'─' * 24}\n"
-        f"🕐 Submitted at {esc(now_for_user(user.id))}"
-    )
+    # Re-check is_yesterday flag from the existing report
+    existing = db.get_report(user.id, report_date)
+    was_yesterday = existing["is_yesterday"] if existing else False
 
-    tag = ""
-    try:
-        channel_msg = await ctx.bot.send_message(
-            chat_id=config.CHANNEL_ID, text=channel_text, parse_mode=ParseMode.MARKDOWN_V2, message_thread_id=config.TOPIC_ID,
-        )
-        if report_id:
-            db.update_channel_message_id(report_id, channel_msg.message_id)
-        else:
-            db.set_channel_message_id_by_user_date(user.id, date, channel_msg.message_id)
-        tag = " and synced to channel"
-    except Exception as e:
-        tag = f" \\(channel sync failed: {esc(str(e))}\\)"
-
-    action = "updated" if state == "awaiting_update" else "submitted"
+    synced = await post_report_to_channel(ctx, user.id, report_date, content, was_yesterday)
+    tag = " and synced to channel" if synced else " \\(channel sync failed\\)"
     await update.message.reply_text(
-        f"✅ Report {action}{esc(tag)}\\!\n\nUse /update anytime to modify\\.",
+        f"✅ Report updated{esc(tag)}\\!\n\nUse /update anytime to modify or delete\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -950,19 +999,43 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # ── Write report button ──
     if query.data == "write_report":
         db_user = db.get_user(query.from_user.id)
         if not db_user or not db_user["is_active"]:
-            return await query.message.reply_text("⛔ You are not on the report list\\. Please contact an admin\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return await query.message.reply_text("⛔ You are not on the report list\\.", parse_mode=ParseMode.MARKDOWN_V2)
         date = today_for_user(query.from_user.id)
-        existing = db.get_today_report(query.from_user.id, date)
+        existing = db.get_report(query.from_user.id, date)
         if existing:
             return await query.message.reply_text("📋 Already submitted today\\. Use /update to modify\\.", parse_mode=ParseMode.MARKDOWN_V2)
         ctx.user_data["state"] = "awaiting_report"
+        ctx.user_data["report_date"] = date
+        ctx.user_data["is_yesterday"] = False
         await query.message.reply_text(
             f"📝 *Daily Report — {esc(date)}*\n\nPlease type your report below 👇",
             parse_mode=ParseMode.MARKDOWN_V2
         )
+        return
+
+    # ── Update date selection ──
+    if query.data.startswith("update_"):
+        date = query.data.replace("update_", "")
+        db_user = db.get_user(query.from_user.id)
+        if not db_user or not db_user["is_active"]:
+            return await query.message.reply_text("⛔ Not on the report list\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        existing = db.get_report(query.from_user.id, date)
+        if not existing:
+            return await query.message.reply_text(f"📭 No report found for {esc(date)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        ctx.user_data["state"] = "awaiting_update"
+        ctx.user_data["report_date"] = date
+        await query.message.reply_text(
+            f"✏️ *Update Report — {esc(date)}*\n\n"
+            f"Current:\n_{esc(existing['content'])}_\n\n"
+            f"Send updated report below, or type `delete` to remove it 👇",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
 
 
 # ──────────────────── Reminder engine ────────────────────
@@ -979,14 +1052,13 @@ async def send_reminders(ctx: ContextTypes.DEFAULT_TYPE, round_num: int = 1) -> 
     }
     text = messages.get(round_num, messages[0])
     count = 0
-
     for user in users:
         user_timezone = pytz.timezone(user["timezone"] or config.DEFAULT_TIMEZONE)
         user_now = datetime.now(user_timezone)
         user_date = user_now.strftime("%Y-%m-%d")
         if not db.should_remind_user(user["user_id"], user_date):
             continue
-        if db.get_today_report(user["user_id"], user_date):
+        if db.get_report(user["user_id"], user_date):
             continue
         try:
             await ctx.bot.send_message(
