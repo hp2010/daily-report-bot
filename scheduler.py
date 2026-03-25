@@ -136,7 +136,7 @@ async def post_daily_summary(ctx) -> bool:
         lines.append(f"📅 *{esc(date_str)}*")
         for user, report in entries:
             name = user_label(user)
-            catch_up = " \\(catch\\-up\\)" if report.get("is_yesterday") else ""
+            catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""
             lines.append(f"  ✅ {esc(name)}{catch_up}")
         lines.append("")
 

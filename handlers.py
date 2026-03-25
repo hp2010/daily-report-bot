@@ -355,7 +355,7 @@ async def cmd_myreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     report = db.get_report(uid, date)
     if report:
-        catch_up = " \\(catch\\-up\\)" if report.get("is_yesterday") else ""
+        catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""   # ← 改这里
         await update.message.reply_text(
             f"📋 *Your report for {esc(date)}:*{catch_up}\n\n{esc(report['content'])}",
             parse_mode=ParseMode.MARKDOWN_V2
@@ -656,7 +656,7 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"📋 *Report Summary — {esc(date)}*\n"]
     for r in reports:
         name = r["display_name"] or r["username"] or str(r["user_id"])
-        catch_up = " \\(catch\\-up\\)" if r.get("is_yesterday") else ""
+        catch_up = " \\(catch\\-up\\)" if r["is_yesterday"] else ""   # ← 改这里
         lines.append(f"*{esc(name)}*{catch_up}:\n{esc(r['content'])}\n")
 
     if missing:
@@ -667,7 +667,6 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines.append(f"📈 *Completion: {len(reports)}/{len(expected)}*")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
-
 
 async def cmd_settz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
