@@ -928,7 +928,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tag = ""
     try:
         channel_msg = await ctx.bot.send_message(
-            chat_id=config.CHANNEL_ID, text=channel_text, parse_mode=ParseMode.MARKDOWN_V2
+            chat_id=config.CHANNEL_ID, text=channel_text, parse_mode=ParseMode.MARKDOWN_V2, message_thread_id=config.TOPIC_ID,
         )
         if report_id:
             db.update_channel_message_id(report_id, channel_msg.message_id)

@@ -133,7 +133,8 @@ async def post_daily_summary(ctx, report_date: str) -> bool:
         await ctx.bot.send_message(
             chat_id=config.CHANNEL_ID,
             text="\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKDOWN_V2,
+	message_thread_id=config.TOPIC_ID 
         )
         print(f"[Summary] Posted for {report_date}")
         return True
