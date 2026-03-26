@@ -8,7 +8,7 @@ from telegram.constants import ParseMode
 
 import config
 import database as db
-from handlers import user_label, user_tz
+from handlers import user_label, user_tz, format_date
 
 TICK_INTERVAL_SECONDS = 30
 
@@ -126,14 +126,14 @@ async def post_daily_summary(ctx) -> bool:
 
     summary_tz_str = db.get_setting("summary_timezone", config.SUMMARY_TIMEZONE)
     summary_tz = pytz.timezone(summary_tz_str)
-    now_str = datetime.now(summary_tz).strftime("%Y-%m-%d %H:%M")
+    now_str = datetime.now(summary_tz).strftime("%a, %b %d %Y %H:%M")
 
     lines = [f"📊 *Daily Status*"]
     lines.append(f"_Collected at {esc(now_str)} \\({esc(summary_tz_str)}\\)_\n")
 
     for date_str in sorted(by_date.keys(), reverse=True):
         entries = by_date[date_str]
-        lines.append(f"📅 *{esc(date_str)}*")
+        lines.append(f"📅 *{esc(format_date(date_str))}*")
         for user, report in entries:
             name = user_label(user)
             catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""

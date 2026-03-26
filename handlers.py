@@ -19,6 +19,14 @@ def esc(text: str) -> str:
     return re.sub(f'([{re.escape(special)}])', r'\\\1', str(text))
 
 
+# ──────────────────── Date format helper ────────────────────
+
+def format_date(date_str: str) -> str:
+    """Convert '2026-03-24' → 'Tue, Mar 24 2026'"""
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    return dt.strftime("%a, %b %d %Y")
+
+
 # ──────────────────── Helpers ────────────────────
 
 def user_tz(user_row):
@@ -216,7 +224,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ──────────────────── /debugtopic ────────────────────
 
 async def cmd_debugtopic(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send /debugtopic in any chat/topic to see its IDs."""
     msg = update.message
     await msg.reply_text(
         f"📍 *Debug Info*\n\n"
@@ -250,7 +257,7 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["report_date"] = date
     ctx.user_data["is_yesterday"] = False
     await update.message.reply_text(
-        f"📝 *Daily Report — {esc(date)}*\n\n"
+        f"📝 *Daily Report — {esc(format_date(date))}*\n\n"
         f"Please type your report below\\.\n\n"
         f"Suggested format:\n"
         f"*Done today:*\n\\- \\.\\.\\.\n\n"
@@ -271,7 +278,7 @@ async def cmd_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     existing = db.get_report(update.effective_user.id, date)
     if existing:
         return await update.message.reply_text(
-            f"📋 You already submitted a report for {esc(date)}\\.\n\n"
+            f"📋 You already submitted a report for {esc(format_date(date))}\\.\n\n"
             f"_{esc(existing['content'])}_\n\n"
             f"Use /update to modify or delete it\\.",
             parse_mode=ParseMode.MARKDOWN_V2
@@ -280,7 +287,7 @@ async def cmd_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["report_date"] = date
     ctx.user_data["is_yesterday"] = True
     await update.message.reply_text(
-        f"📝 *Yesterday's Report — {esc(date)}*\n\n"
+        f"📝 *Yesterday's Report — {esc(format_date(date))}*\n\n"
         f"Please type your report for yesterday below 👇",
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -309,7 +316,7 @@ async def cmd_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["state"] = "awaiting_update"
         ctx.user_data["report_date"] = today
         return await update.message.reply_text(
-            f"✏️ *Update Report — {esc(today)}*\n\n"
+            f"✏️ *Update Report — {esc(format_date(today))}*\n\n"
             f"Current:\n_{esc(today_report['content'])}_\n\n"
             f"Send updated report below, or type `delete` to remove it 👇",
             parse_mode=ParseMode.MARKDOWN_V2
@@ -319,17 +326,16 @@ async def cmd_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["state"] = "awaiting_update"
         ctx.user_data["report_date"] = yesterday
         return await update.message.reply_text(
-            f"✏️ *Update Report — {esc(yesterday)}*\n\n"
+            f"✏️ *Update Report — {esc(format_date(yesterday))}*\n\n"
             f"Current:\n_{esc(yesterday_report['content'])}_\n\n"
             f"Send updated report below, or type `delete` to remove it 👇",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
-    # Both exist — let user choose
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"Today ({today})", callback_data=f"update_{today}"),
-            InlineKeyboardButton(f"Yesterday ({yesterday})", callback_data=f"update_{yesterday}"),
+            InlineKeyboardButton(f"Today ({format_date(today)})", callback_data=f"update_{today}"),
+            InlineKeyboardButton(f"Yesterday ({format_date(yesterday)})", callback_data=f"update_{yesterday}"),
         ]
     ])
     await update.message.reply_text(
@@ -355,22 +361,22 @@ async def cmd_myreport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     report = db.get_report(uid, date)
     if report:
-        catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""   # ← 改这里
+        catch_up = " \\(catch\\-up\\)" if report["is_yesterday"] else ""
         await update.message.reply_text(
-            f"📋 *Your report for {esc(date)}:*{catch_up}\n\n{esc(report['content'])}",
+            f"📋 *Your report for {esc(format_date(date))}:*{catch_up}\n\n{esc(report['content'])}",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
         if label == "today":
             await update.message.reply_text(
-                f"📭 No report submitted for {label} \\({esc(date)}\\)\\.\n"
+                f"📭 No report submitted for {label} \\({esc(format_date(date))}\\)\\.\n"
                 f"Use /report to submit\\.\n\n"
                 f"_Tip: use `/myreport yesterday` to check yesterday's\\._",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         else:
             await update.message.reply_text(
-                f"📭 No report for {label} \\({esc(date)}\\)\\.\n"
+                f"📭 No report for {label} \\({esc(format_date(date))}\\)\\.\n"
                 f"Use /yesterday to submit a catch\\-up\\.",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
@@ -392,7 +398,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name = user_label(u)
         (done if u["user_id"] in submitted_ids else pending).append(name)
 
-    lines = [f"📊 *Report Status — {esc(date)}*\n"]
+    lines = [f"📊 *Report Status — {esc(format_date(date))}*\n"]
     lines.append(f"*Submitted \\({len(done)}\\):*")
     lines.extend([f"  ✅ {esc(n)}" for n in done] or ["  \\(none\\)"])
     lines.append(f"\n*Pending \\({len(pending)}\\):*")
@@ -444,7 +450,7 @@ async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for d in dates:
             db.remove_override(scope, d, "vacation")
         return await update.message.reply_text(
-            f"✅ Removed your vacation: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.",
+            f"✅ Removed your vacation: `{esc(format_date(dates[0]))}` → `{esc(format_date(dates[-1]))}` \\({len(dates)} day\\(s\\)\\)\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -456,7 +462,7 @@ async def cmd_vacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for d in dates:
         db.add_override(scope, d, "vacation", note="self-service vacation")
     await update.message.reply_text(
-        f"🏖️ Vacation set: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.\n\n"
+        f"🏖️ Vacation set: `{esc(format_date(dates[0]))}` → `{esc(format_date(dates[-1]))}` \\({len(dates)} day\\(s\\)\\)\\.\n\n"
         f"Use `/myschedule` to view your schedule\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
@@ -494,14 +500,14 @@ async def cmd_myschedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append("*Team\\-wide:*")
         for o in global_overrides:
             icon = "🏖️" if o["type"] == "vacation" else "💼"
-            lines.append(f"  {icon} {esc(o['date'])} \\({esc(o['type'])}\\)")
+            lines.append(f"  {icon} {esc(format_date(o['date']))} \\({esc(o['type'])}\\)")
 
     if user_overrides:
         has_any = True
         lines.append("\n*Your overrides:*" if global_overrides else "*Your overrides:*")
         for o in user_overrides:
             icon = "🏖️" if o["type"] == "vacation" else "💼"
-            lines.append(f"  {icon} {esc(o['date'])} \\({esc(o['type'])}\\)")
+            lines.append(f"  {icon} {esc(format_date(o['date']))} \\({esc(o['type'])}\\)")
 
     if not has_any:
         lines.append("No overrides this month\\.")
@@ -647,16 +653,16 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     reports = db.get_reports_for_date(date)
     if not reports:
-        return await update.message.reply_text(f"📭 No reports for {esc(date)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        return await update.message.reply_text(f"📭 No reports for {esc(format_date(date))}\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     expected = db.get_active_expected_users(date)
     submitted_ids = {r["user_id"] for r in reports}
     missing = [u for u in expected if u["user_id"] not in submitted_ids]
 
-    lines = [f"📋 *Report Summary — {esc(date)}*\n"]
+    lines = [f"📋 *Report Summary — {esc(format_date(date))}*\n"]
     for r in reports:
         name = r["display_name"] or r["username"] or str(r["user_id"])
-        catch_up = " \\(catch\\-up\\)" if r["is_yesterday"] else ""   # ← 改这里
+        catch_up = " \\(catch\\-up\\)" if r["is_yesterday"] else ""
         lines.append(f"*{esc(name)}*{catch_up}:\n{esc(r['content'])}\n")
 
     if missing:
@@ -667,6 +673,7 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines.append(f"📈 *Completion: {len(reports)}/{len(expected)}*")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
+
 
 async def cmd_settz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -773,7 +780,7 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 db.remove_override(scope, d, "vacation")
                 db.remove_override(scope, d, "duty")
         return await update.message.reply_text(
-            f"✅ Removed overrides `{esc(dates[0])}` → `{esc(dates[-1])}` for {len(scopes)} scope\\(s\\)\\.",
+            f"✅ Removed overrides `{esc(format_date(dates[0]))}` → `{esc(format_date(dates[-1]))}` for {len(scopes)} scope\\(s\\)\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -794,7 +801,7 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for d in dates:
                 db.add_override(scope, d, "duty", note="admin set duty")
         return await update.message.reply_text(
-            f"💼 Duty set for {labels}: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.",
+            f"💼 Duty set for {labels}: `{esc(format_date(dates[0]))}` → `{esc(format_date(dates[-1]))}` \\({len(dates)} day\\(s\\)\\)\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -812,7 +819,7 @@ async def cmd_adminvacation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for d in dates:
             db.add_override(scope, d, "vacation", note="admin set vacation")
     await update.message.reply_text(
-        f"🏖️ Vacation set for {labels}: `{esc(dates[0])}` → `{esc(dates[-1])}` \\({len(dates)} day\\(s\\)\\)\\.",
+        f"🏖️ Vacation set for {labels}: `{esc(format_date(dates[0]))}` → `{esc(format_date(dates[-1]))}` \\({len(dates)} day\\(s\\)\\)\\.",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -842,7 +849,7 @@ async def cmd_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     scope_label = user_label(u) if u else o["scope"]
                 except (ValueError, TypeError):
                     scope_label = o["scope"]
-            lines.append(f"  {icon} {esc(o['date'])} — {esc(scope_label)} \\({esc(o['type'])}\\)")
+            lines.append(f"  {icon} {esc(format_date(o['date']))} — {esc(scope_label)} \\({esc(o['type'])}\\)")
     else:
         lines.append("No overrides this month\\.")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
@@ -962,7 +969,6 @@ def _date_range(start: str, end: str) -> list:
 
 async def post_report_to_channel(ctx, user_id: int, report_date: str, content: str,
                                   is_yesterday: bool, report_id: int = None):
-    """Post a report to channel (with optional topic), return success bool."""
     db_user = db.get_user(user_id)
     name = db_user["display_name"] if db_user and db_user["display_name"] else str(user_id)
     tz_label = user_tz_abbrev(db_user)
@@ -971,7 +977,7 @@ async def post_report_to_channel(ctx, user_id: int, report_date: str, content: s
     yesterday_tag = " \\(catch\\-up\\)" if is_yesterday else ""
 
     channel_text = (
-        f"📋 *Daily Report — {esc(report_date)}*{yesterday_tag}\n"
+        f"📋 *Daily Report — {esc(format_date(report_date))}*{yesterday_tag}\n"
         f"👤 *{esc(name)}*\n"
         f"{'─' * 24}\n\n"
         f"{esc(content)}\n\n"
@@ -1028,7 +1034,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         await update.message.reply_text(
-            f"🗑️ Report for {esc(report_date)} deleted\\.",
+            f"🗑️ Report for {esc(format_date(report_date))} deleted\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -1040,7 +1046,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if report_id is None:
             ctx.user_data["state"] = None
             return await update.message.reply_text(
-                f"⚠️ Already submitted for {esc(report_date)}\\. Use /update to modify\\.",
+                f"⚠️ Already submitted for {esc(format_date(report_date))}\\. Use /update to modify\\.",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         ctx.user_data["state"] = None
@@ -1079,7 +1085,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # ── Write report button ──
     if query.data == "write_report":
         db_user = db.get_user(query.from_user.id)
         if not db_user or not db_user["is_active"]:
@@ -1092,12 +1097,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["report_date"] = date
         ctx.user_data["is_yesterday"] = False
         await query.message.reply_text(
-            f"📝 *Daily Report — {esc(date)}*\n\nPlease type your report below 👇",
+            f"📝 *Daily Report — {esc(format_date(date))}*\n\nPlease type your report below 👇",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
 
-    # ── Update date selection ──
     if query.data.startswith("update_"):
         date = query.data.replace("update_", "")
         db_user = db.get_user(query.from_user.id)
@@ -1105,11 +1109,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await query.message.reply_text("⛔ Not on the report list\\.", parse_mode=ParseMode.MARKDOWN_V2)
         existing = db.get_report(query.from_user.id, date)
         if not existing:
-            return await query.message.reply_text(f"📭 No report found for {esc(date)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return await query.message.reply_text(f"📭 No report found for {esc(format_date(date))}\\.", parse_mode=ParseMode.MARKDOWN_V2)
         ctx.user_data["state"] = "awaiting_update"
         ctx.user_data["report_date"] = date
         await query.message.reply_text(
-            f"✏️ *Update Report — {esc(date)}*\n\n"
+            f"✏️ *Update Report — {esc(format_date(date))}*\n\n"
             f"Current:\n_{esc(existing['content'])}_\n\n"
             f"Send updated report below, or type `delete` to remove it 👇",
             parse_mode=ParseMode.MARKDOWN_V2
