@@ -977,11 +977,11 @@ async def post_report_to_channel(ctx, user_id: int, report_date: str, content: s
     yesterday_tag = " \\(catch\\-up\\)" if is_yesterday else ""
 
     channel_text = (
+        f"👤  *{esc(name)}*\n\n"
         f"📋 *Daily Report — {esc(format_date(report_date))}*{yesterday_tag}\n"
-        f"👤 *{esc(name)}*\n"
-        f"{'─' * 24}\n\n"
+        f"{'─' * 30}\n\n"
         f"{esc(content)}\n\n"
-        f"{'─' * 24}\n"
+        f"{'─' * 30}\n"
         f"🕐 {esc(time_str)} \\({esc(tz_label)}\\)"
     )
 
