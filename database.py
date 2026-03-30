@@ -217,18 +217,36 @@ def get_overrides_for_date(date_str: str) -> list:
 
 
 def should_remind_user(user_id: int, date_str: str) -> bool:
+    """
+    Priority:
+    1. Per-user "duty" → MUST remind (even weekends)
+    2. Per-user "vacation" → DO NOT remind
+    3. Global "vacation" → DO NOT remind
+    4. Weekend (Sat/Sun) → DO NOT remind (unless duty override)
+    5. Otherwise → remind
+    """
     overrides = get_overrides_for_date(date_str)
     user_scope = str(user_id)
 
+    # 1. Per-user duty overrides everything
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "duty":
             return True
+
+    # 2. Per-user vacation
     for o in overrides:
         if o["scope"] == user_scope and o["type"] == "vacation":
             return False
+
+    # 3. Global vacation
     for o in overrides:
         if o["scope"] == "all" and o["type"] == "vacation":
             return False
+
+    # 4. Weekend — skip unless duty (already handled above)
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    if dt.weekday() in (5, 6):  # Saturday=5, Sunday=6
+        return False
 
     return True
 

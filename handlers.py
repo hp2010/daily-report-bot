@@ -260,13 +260,15 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📝 *Daily Report — {esc(format_date(date))}*\n\n"
         f"Please type your report below\\.\n\n"
         f"Suggested format:\n"
-        f"*Done today:*\n\\- \\.\\.\\.\n\n"
-        f"*Blockers:*\n\\- \\.\\.\\.\n\n"
-        f"*Plan for tomorrow:*\n\\- \\.\\.\\.\n\n"
+        f"*1\\. What did I do yesterday?*\n"
+        f"\\- \\.\\.\\.\n\n"
+        f"*2\\. What will I do today?*\n"
+        f"\\- \\.\\.\\.\n\n"
+        f"*3\\. What obstacles am I facing?*\n"
+        f"\\- \\.\\.\\.\n\n"
         f"Send your message when ready 👇",
         parse_mode=ParseMode.MARKDOWN_V2
     )
-
 
 # ──────────────────── /yesterday ────────────────────
 
